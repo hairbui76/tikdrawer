@@ -6,6 +6,18 @@ A running log of decisions, changes, and gotchas for the **TikDrawer** project.
 
 ---
 
+## 2026-06-26 — Fix dvisvgm PDF→SVG in Docker (install mutool)
+
+- On the Docker/Railway image `dvisvgm --pdf` failed: "either Ghostscript <
+  10.01.0 or mutool is required" — the TeX Live image ships Ghostscript 10.07.1
+  (too new for dvisvgm's PDF path) and no `mutool`.
+- Fix: Dockerfile now `apt-get install`s **mupdf-tools** (provides `mutool`),
+  which dvisvgm uses for PDF→SVG instead of Ghostscript. Rebuild/redeploy the
+  image. (The separate "pdflatex not found" was Vercel before
+  `TIKDRAWER_RENDER_URL` was set.)
+
+---
+
 ## 2026-06-26 — Render-service auth token + Railway deploy docs
 
 - Added optional `TIKDRAWER_RENDER_TOKEN`: the proxy (Vercel) sends it as
