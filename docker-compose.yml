@@ -1,0 +1,14 @@
+# Runs TikDrawer with a bundled TeX Live toolchain — no LaTeX needed on the host.
+#   docker compose up --build
+# Then open http://localhost:3000
+services:
+  web:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      # Override only if your TeX binaries are named differently.
+      TIKDRAWER_LATEX_ENGINE: pdflatex
+      TIKDRAWER_DVISVGM: dvisvgm
+      TIKDRAWER_TIMEOUT_MS: "20000"
+    restart: unless-stopped

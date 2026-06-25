@@ -1,0 +1,9 @@
+/node_modules
+/.next
+/out
+/build
+*.log
+.env*
+.DS_Store
+/coverage
+next-env.d.ts.bak
