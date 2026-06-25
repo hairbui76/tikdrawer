@@ -8,6 +8,16 @@ import { fullDocument } from "@/lib/generateTikz";
 
 const exec = promisify(execFile);
 
+// When set (e.g. on Vercel, which has no TeX Live), forward render requests to
+// an external render service — typically the Docker image deployed on a
+// Docker-capable host. Should be the full URL of that service's /api/render.
+const RENDER_URL = process.env.TIKDRAWER_RENDER_URL;
+
+// Optional shared secret. When set on the render service, requests must carry a
+// matching `x-tikdrawer-token` header — the proxy adds it from the same env —
+// so the public compile endpoint can't be abused by arbitrary callers.
+const RENDER_TOKEN = process.env.TIKDRAWER_RENDER_TOKEN;
+
 // The render API shells out to a LaTeX toolchain installed on the host machine.
 // Override the binaries via env vars if they are not on PATH / named differently.
 const ENGINE = process.env.TIKDRAWER_LATEX_ENGINE || "pdflatex";
@@ -33,10 +43,41 @@ function extractError(log: string): string {
 type ReqImage = { name: string; dataUrl: string };
 
 export async function POST(req: Request) {
+  const body = await req.text();
+
+  // Proxy to an external render service when configured (e.g. on Vercel).
+  if (RENDER_URL) {
+    try {
+      const upstream = await fetch(RENDER_URL, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(RENDER_TOKEN ? { "x-tikdrawer-token": RENDER_TOKEN } : {}),
+        },
+        body,
+      });
+      const text = await upstream.text();
+      return new NextResponse(text, {
+        status: upstream.status,
+        headers: { "content-type": "application/json" },
+      });
+    } catch (e) {
+      return NextResponse.json({
+        ok: false,
+        log: `Could not reach the render service (TIKDRAWER_RENDER_URL): ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
+  }
+
+  // This instance actually compiles. If a token is configured, require it.
+  if (RENDER_TOKEN && req.headers.get("x-tikdrawer-token") !== RENDER_TOKEN) {
+    return NextResponse.json({ ok: false, log: "Forbidden" }, { status: 403 });
+  }
+
   let tikz: unknown;
   let images: unknown;
   try {
-    ({ tikz, images } = await req.json());
+    ({ tikz, images } = JSON.parse(body));
   } catch {
     return NextResponse.json({ ok: false, log: "Invalid JSON body" }, { status: 400 });
   }

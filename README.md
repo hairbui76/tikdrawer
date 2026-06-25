@@ -44,6 +44,46 @@ docker compose up --build
 # open http://localhost:3000
 ```
 
+## Deploying (Vercel UI + Railway render service)
+
+Vercel (and any serverless host) has **no TeX Live**, so `/api/render` can't run
+`pdflatex` there. Run the LaTeX renderer separately (the bundled Docker image)
+and point the Vercel UI at it.
+
+### 1. Render service on Railway (Docker + TeX Live)
+
+- New Project → **Deploy from GitHub repo** → this repo. Railway detects the
+  `Dockerfile` (bundled TeX Live) and builds it. *(The TeX Live base image is
+  large, so the first build is slow.)*
+- Settings → **Networking → Generate Domain** to get a public URL, e.g.
+  `https://tikdrawer-render.up.railway.app`.
+- Env vars on Railway: leave `TIKDRAWER_RENDER_URL` **unset** (so it compiles
+  locally), and set a secret `TIKDRAWER_RENDER_TOKEN=<random string>`.
+- `next start` binds to Railway's injected `PORT` automatically.
+
+### 2. Vercel UI
+
+Set env vars on Vercel and redeploy:
+
+- `TIKDRAWER_RENDER_URL=https://<railway-domain>/api/render`
+- `TIKDRAWER_RENDER_TOKEN=<same secret as Railway>`
+
+Vercel's `/api/render` then **proxies** requests to the Railway service
+server-side (no CORS), attaching the token header. The Railway service rejects
+any request without the matching token.
+
+| Env var | Where | Purpose |
+| --- | --- | --- |
+| `TIKDRAWER_RENDER_URL` | Vercel only | URL of the Railway `/api/render` to proxy to |
+| `TIKDRAWER_RENDER_TOKEN` | both | shared secret guarding the public compiler |
+
+When `TIKDRAWER_RENDER_URL` is unset (local dev / the Docker container itself),
+rendering shells out to local `pdflatex` as before.
+
+> Note: image-embed requests send base64 data; keep them under the host's body
+> limit (Vercel ~4.5 MB). Or run the whole app from the Docker image (Railway)
+> and skip Vercel entirely.
+
 ## Security note
 
 User-supplied LaTeX is compiled with shell-escape disabled, a timeout, and an

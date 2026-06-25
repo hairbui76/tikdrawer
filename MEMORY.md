@@ -6,6 +6,32 @@ A running log of decisions, changes, and gotchas for the **TikDrawer** project.
 
 ---
 
+## 2026-06-26 — Render-service auth token + Railway deploy docs
+
+- Added optional `TIKDRAWER_RENDER_TOKEN`: the proxy (Vercel) sends it as
+  `x-tikdrawer-token`; the compiling instance (Railway) rejects mismatches with
+  403 — guards the public LaTeX compiler. Only enforced on the compile path
+  (after the proxy branch), so same-origin browser→Vercel calls are unaffected.
+- README "Deploying" rewritten with concrete Railway (Docker render service) +
+  Vercel (UI proxy) steps and the env-var table. `tsc` + `next build` clean.
+
+---
+
+## 2026-06-26 — Vercel render: proxy to external TeX service
+
+- **Problem**: on Vercel (no TeX Live) `/api/render` fails with "pdflatex not
+  found" — serverless can't run/install LaTeX (the long-noted constraint).
+- **Fix (opt-in proxy)**: `/api/render` now checks `TIKDRAWER_RENDER_URL`; when
+  set it **forwards** the request body to that URL and returns the response.
+  Unset → original local `pdflatex` path. Intended deploy: Docker image (bundled
+  TeX Live) on Railway/Fly/Render as the renderer; Vercel UI sets
+  `TIKDRAWER_RENDER_URL=https://<host>/api/render` to proxy server-side (no
+  CORS). README "Deploying" section documents it.
+- Alternative noted: deploy the whole Docker image (skip Vercel), or client-side
+  TikZJax (limited packages / no `\includegraphics`). `tsc` + `next build` clean.
+
+---
+
 ## 2026-06-24 — Fix: double-click to edit shape text
 
 - **Bug**: double-clicking a shape didn't start text editing. Cause: the
