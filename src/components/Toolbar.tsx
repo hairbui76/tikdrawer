@@ -21,6 +21,13 @@ function ToolIcon({ tool }: { tool: Tool }) {
           <path d="M4 3l15 7.5-6.2 1.8L10 21z" />
         </svg>
       );
+    case "anchor":
+      return (
+        <svg {...s}>
+          <line x1="4" y1="20" x2="20" y2="4" />
+          <circle cx="12" cy="12" r="3" fill="currentColor" stroke="none" />
+        </svg>
+      );
     case "line":
       return (
         <svg {...s}>
@@ -92,6 +99,7 @@ function ToolIcon({ tool }: { tool: Tool }) {
 export type ToolDef = { id: Tool; label: string; key?: string; hint: string };
 
 const SELECT_TOOL: ToolDef = { id: "select", label: "Select", key: "V", hint: "Select / move shapes" };
+const ANCHOR_TOOL: ToolDef = { id: "anchor", label: "Anchor", key: "A", hint: "Click a connector to add a bend point" };
 
 const SHAPE_TOOLS: ToolDef[] = [
   { id: "line", label: "Line", key: "L", hint: "Drag to draw a line" },
@@ -114,7 +122,7 @@ const CONNECT_TOOLS: ToolDef[] = [
 
 /** Lookup used by the keyboard shortcut handler. */
 export const TOOL_BY_KEY: Record<string, Tool> = Object.fromEntries(
-  [SELECT_TOOL, ...SHAPE_TOOLS, ...PRESET_TOOLS, ...CONNECT_TOOLS]
+  [SELECT_TOOL, ANCHOR_TOOL, ...SHAPE_TOOLS, ...PRESET_TOOLS, ...CONNECT_TOOLS]
     .filter((t) => t.key)
     .map((t) => [t.key!.toLowerCase(), t.id]),
 );
@@ -167,6 +175,7 @@ export function Toolbar() {
         <h3 className="px-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">Tool</h3>
         <div className="grid grid-cols-3 gap-1.5">
           <ToolButton t={SELECT_TOOL} />
+          <ToolButton t={ANCHOR_TOOL} />
         </div>
       </div>
       <Group title="Shapes" tools={SHAPE_TOOLS} />

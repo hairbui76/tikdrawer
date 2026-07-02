@@ -35,13 +35,19 @@ export function ProjectBar() {
 
   async function openFromFile() {
     const res = await openProjectFromFile();
-    if (!res) return;
+    if (!res) {
+      window.alert("Nothing to import — the file wasn't a TikDrawer drawing, a tikzpicture, or a recognisable SVG.");
+      return;
+    }
     newProjectFromShapes(res.name, res.shapes);
-    // The newly created project is now current — remember its file handle and
-    // mark it as saved (it matches the file on disk).
     const id = useStore.getState().currentProjectId;
-    rememberHandle(id, res.handle);
-    markSaved(id, signatureOf(res.name, res.shapes));
+    if (res.kind === "json") {
+      // Native drawing: remember its handle and mark it as matching disk.
+      rememberHandle(id, res.handle);
+      markSaved(id, signatureOf(res.name, res.shapes));
+    }
+    // Imported .tex/.svg stay "unsaved" so the next Save writes a .tikz.json
+    // rather than overwriting the source file.
   }
 
   const tplShapes = () => {
@@ -109,7 +115,7 @@ export function ProjectBar() {
       </button>
       <button
         onClick={openFromFile}
-        title="Open a .tikz.json drawing file from your computer"
+        title="Open a drawing (.tikz.json), a TikZ file (.tex/.tikz), or an SVG — imported as editable shapes"
         className="rounded border border-slate-300 bg-white px-2 py-1 text-sm hover:bg-slate-100"
       >
         📂 Open file

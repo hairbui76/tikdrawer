@@ -6,6 +6,211 @@ A running log of decisions, changes, and gotchas for the **TikDrawer** project.
 
 ---
 
+## 2026-07-02 — Fix: SVG-imported text became solid boxes ("ô đen") in preview
+
+- **Bug**: after importing an SVG, every text node rendered as a **solid filled
+  rectangle** hiding the text. NOT a font/Unicode/dvisvgm issue (server SVG was
+  fine; resvg rasterised it as text). Diagnosed by dumping the exact
+  browser→server document: each node was `\node[text=C, fill=C, draw=C]{…}` —
+  **fill == text color**, so the node box was painted the same color as its own
+  text → text invisible inside a solid box.
+- **Root cause** (`importSvg.ts`, `<text>` case): SVG `fill` on a `<text>` is the
+  **glyph color**, not a background. `styleOf` correctly folds it into `stroke`
+  (node text color) but ALSO left `style.fill` = that color, so generateTikz
+  emitted a filled node box.
+- **Fix**: text → node now forces `style.fill = "none"` (transparent node bg),
+  keeping `stroke` as the text color. Real shapes (rect/etc.) keep their SVG
+  fill — the override is text-only.
+- **⚠️ Existing imports stay broken** (bad fill is baked into the saved shapes):
+  **re-open the SVG** to get a corrected drawing. A node legitimately CAN have a
+  fill (colored label bg), so we don't strip it retroactively/in generateTikz.
+- Verified: import test (text node → `fill:none`, stroke keeps `#712b13`; rect
+  fill preserved). `tsc` + `next build` clean. Removed the temp debug dumps that
+  were added to `route.ts` for diagnosis.
+
+---
+
+## 2026-07-02 — Fix: Unicode/Vietnamese text render error (LaTeX)
+
+- **Bug**: nodes with non-ASCII text (e.g. Vietnamese "So sánh với ngưỡng") made
+  the render fail — `! LaTeX Error: Unicode character ớ (U+1EDB) not set up for
+  use with LaTeX`, no PDF produced.
+- **Cause**: `fullDocument` loaded no input/font encoding, so pdfLaTeX couldn't
+  map Unicode characters.
+- **Fix** (`generateTikz.ts` `fullDocument`): engine-aware Unicode setup via
+  `iftex`. pdfLaTeX → `\usepackage[utf8]{inputenc}` + `[T1,T5]{fontenc}` (T5 =
+  Vietnamese) + `lmodern`; XeLaTeX/LuaLaTeX → `fontspec` (full Unicode). No
+  engine change, so the default pdflatex path keeps working.
+- **Verified** end-to-end on the local toolchain: pdflatex compiles the
+  Vietnamese sample (exit 0, PDF), dvisvgm → SVG; rasterised the SVG with resvg
+  → text (incl. "ớ", en-dash "–", arrow "→") renders correctly, no tofu boxes.
+  `tsc` clean.
+- **⚠️ Gotcha (tofu boxes on first render)**: on MiKTeX the *first* render after
+  this change draws **filled boxes** instead of glyphs, because MiKTeX is still
+  auto-installing the newly-required `fontenc T5` / `lmodern` outline fonts and
+  dvisvgm can't trace them yet. Once the packages finish installing, a fresh
+  render is clean. Also note the **client only re-renders when the TikZ `code`
+  string changes** (Editor effect dep), NOT when server-side `fullDocument`
+  changes — so after editing render code you must nudge the drawing (or restart
+  dev) to trigger a new compile; the preview otherwise shows the stale result.
+- Note: covers Latin+Vietnamese under pdflatex; for other scripts (CJK, etc.)
+  compile with lua/xelatex (set `TIKDRAWER_LATEX_ENGINE`), which fontspec covers.
+  (LuaLaTeX failed to launch on this machine's MiKTeX, so pdflatex+T5 is the
+  reliable default here.)
+
+---
+
+## 2026-07-02 — Open .tex (tikzpicture) / .svg as editable shapes (reverse import)
+
+- **New feature**: the "📂 Open file" button now also opens **`.tex`/`.tikz`**
+  files containing a `tikzpicture` and **`.svg`** files, parsing them into
+  editable canvas shapes (a new drawing). Native `.tikz.json` still opens as
+  before.
+- **⚠️ Deliberate deviation from AGENTS.md**: this reverses the documented
+  one-way data flow (`model → TikZ → render`, "do not parse TikZ back"). The
+  user explicitly asked for editable import of both formats, so we now parse
+  TikZ/SVG **into** the model. It's intentionally **lossy** — only the
+  primitives this app emits + common variants are understood.
+- **New modules**:
+  - `src/lib/importTikz.ts` — `importTikz(src)`: extracts the tikzpicture body,
+    strips comments, splits on top-level `;`, parses `\draw/\path/\fill/\filldraw`
+    (line, rect, roundrect via `rounded corners`, circle, ellipse, polygon via
+    `-- … -- cycle`, curved paths `.. controls .. and ..` → a free **curved
+    connector**) and `\node`. Parses options (`draw=`/bare color, `fill=`,
+    `line width`, thin/thick presets, dashed/dotted, `opacity`, arrow tips) and
+    colors (`{rgb,255:…}`, named, `#hex`). Lengths honor cm/mm/pt/bp/in/px.
+  - `src/lib/importSvg.ts` — `importSvg(src)` (browser-only, DOMParser): walks
+    line/rect/circle/ellipse/polygon/polyline/path/text, applying element+ancestor
+    **transforms** (translate/scale/rotate/matrix/skew). Axis-aligned transforms
+    keep native kinds; rotated/skewed rects become polygons. Paths keep segment
+    **endpoints** (curve control points dropped). Skips `defs/symbol/clipPath/mask`.
+- **coords.ts**: added inverse conversions `cmToPxX`/`cmToPxY`/`cmToLen` (kept in
+  the one coordinate module, per CLAUDE.md).
+- **fitIntoCanvas** (in importTikz): if an import lands outside the 800×600
+  canvas it's uniformly scaled + translated to fit (40px margin); in-bounds
+  drawings are left exact so **round-trips are faithful**.
+- **files.ts**: `openProjectFromFile` broadened to accept .json/.tex/.tikz/.svg;
+  `parse(text, filename)` detects format by extension then by content sniff.
+  Returns a `kind`; a file **handle is remembered only for `.json`** so Ctrl+S
+  won't overwrite an imported .tex/.svg with JSON (imported docs stay "Unsaved"
+  → next Save writes a fresh `.tikz.json`). ProjectBar alerts if nothing parsed.
+- **Verified**: `tsc` + `next build` clean. Round-trip logic test
+  (generateTikz → importTikz) **39/39**; jsdom SVG parser test **21/21**
+  (primitives, styles, group transform, out-of-bounds fit).
+- **Known limits**: no reverse of rotation-in-TikZ (`rotate around=`), diamonds
+  import as polygons, cylinders/images not imported, dvisvgm glyph-path SVGs
+  import as many polygons (not text). Fine for the intended hand-authored files.
+
+---
+
+## 2026-06-26 — Dynamic (floating) connector anchors
+
+- `attach: "auto"` is now a **dynamic/floating** anchor: it snaps to the
+  **centre of the side facing the next point** (other end or first/last
+  waypoint) via `nearestCardinalSide` + `sidePoint`, instead of an arbitrary
+  boundary point. So dragging the route (or moving a shape) makes the anchor
+  hop to the appropriate edge (top→right→…), like draw.io floating connections.
+- Tool X creates auto/auto (dynamic by default); set From/To = "Auto" in the
+  panel to make a port-anchored end dynamic, or pick a named side to fix it.
+- `tsc` + `next build` clean; logic test: auto picks E/N/S/W by route direction.
+
+---
+
+## 2026-06-26 — Ports always include corners+mids; Anchor-tool hover marker
+
+- **Guaranteed ports**: `portsOf` now forces an **even** count per box edge (so
+  corner t=0 AND mid t=0.5 are always present → the required 4 corners + 4
+  edge-midpoints), and a **multiple of 8** around circle/ellipse (N/S/E/W + 4
+  diagonals always present); extra points fill in for larger shapes. (Removed
+  `clampInt`.) Logic test confirmed across sizes.
+- **Anchor-tool hover**: hovering a connector/polygon with the Anchor tool now
+  shows a blue "+" marker at the exact point a bend/vertex would be added
+  (`anchorHover`, set in `onMove`; hit-tests return the projected world point so
+  the inserted point snaps onto the line). Cleared on tool change.
+- `tsc` + `next build` clean.
+
+---
+
+## 2026-06-26 — Anchor tool (A) + Shift-drag segment + polygon vertex editing
+
+- New **Anchor tool (A)** next to Select. Click a **connector** to add a bend
+  (`connectorHitTest` → `addWaypoint`); click a **polygon** edge to add a vertex
+  (`polygonHitTest` → `addPolygonVertex`, rotation-aware, local coords). Replaces
+  the old Shift-"+" add affordance (removed `shiftHeld`/`addMarker` + midpoint
+  dots).
+- **Select-tool drag mapping** (as requested): default drag of a square handle
+  = move that anchor/vertex; **Shift + drag a connector line** = move the whole
+  segment under the cursor (`onShapeDown` → `onSegmentDown` via
+  `nearestOnPolyline`).
+- **Polygon = customizable shape**: a selected polygon now shows **vertex
+  handles** (squares: drag to move with align-snap, double-click to remove —
+  keeps ≥2 pts) instead of bbox resize handles; rotate still shown; panel
+  Width/Height still scales. New drag type `vertex`.
+- Non-polygon shapes aren't vertex-editable yet (would need convert-to-polygon).
+- `tsc` + `next build` clean.
+
+---
+
+## 2026-06-26 — Distinguish point-move vs segment-move handles
+
+- The two connector handle types were both blue and confusing. Now: **white
+  square** = a bend point (drag to move that single point freely / double-click
+  to remove); **blue dot** at a segment midpoint = drag to move the whole
+  segment perpendicular. (Behaviour unchanged; just clearer visuals + hint.)
+- `tsc` + `next build` clean.
+
+---
+
+## 2026-06-26 — Connector segment-drag (move whole segment, draw.io style)
+
+- Dragging a segment's **midpoint dot** now **translates the whole segment
+  perpendicular** (horizontal segment moves up/down, vertical moves left/right)
+  instead of creating a single peak. New drag type `segment` with `{axis,li,ri,
+  origWp}`. Port-end segments insert a stub waypoint at the port so the shape
+  stays connected while the segment moves (`onSegmentDown` builds the new
+  waypoints + the two indices to move). Cursor shows ns/ew-resize per axis.
+- Shift + hover still shows the "+" to add a single bend; waypoint squares still
+  drag (align-snap) / double-click to remove.
+- `tsc` + `next build` clean.
+
+---
+
+## 2026-06-26 — Connector bends: align-snap + Shift-to-add (draw.io style)
+
+- **Waypoint drag aligns instead of grid-snapping**: dragging a bend now uses
+  raw coords + `alignSnap` (snaps x/y to a neighbouring point within 8px) so
+  zig-zag segments line up with the shape's connection ports (the grid-snap was
+  making them miss the ports). New bends also align on insert.
+- **Add-point UX**: by default a selected connector shows subtle **reshape dots**
+  at segment midpoints (drag to bend, draw.io-like). Holding **Shift** while
+  hovering the line shows a **"+"** at the projected point (`nearestOnPolyline`)
+  to insert a bend exactly there. Shift hides the midpoint dots.
+- `tsc` + `next build` clean; `nearestOnPolyline` logic test (3 cases) passed.
+
+---
+
+## 2026-06-26 — Connector waypoints (multi-bend, zig-zag or smooth) + ports only when unselected
+
+- **Connector model**: replaced the single quadratic `control` with
+  `waypoints: Point[]` + `curved`. Straight = polyline through points (zig-zag);
+  curved = smooth Catmull-Rom→cubic Bézier through the same points (geometry
+  `connectorPoints`, `smoothControls`, `svgPath` shared by canvas + TikZ so the
+  preview matches output). Auto-attached ends now face the first/last waypoint.
+  Old saved connectors (no `waypoints`) default to a straight line.
+- **Editing** (selected connector): endpoint handles, a square handle per
+  waypoint (drag to move, double-click to remove), and a translucent “+” at each
+  segment midpoint to insert a bend (inserts + starts dragging). Drag type
+  `control` → `waypoint{index}`.
+- **PropertiesPanel**: "Straighten curve" button → a **Curved** checkbox
+  (smooth vs zig-zag).
+- **Ports on hover only when nothing is selected** (`portShape` now also
+  requires `selectedIds.length === 0`) — selecting a shape shows just
+  resize/rotate handles, as requested.
+- `tsc` + `next build` clean; 6-case logic test (waypoints, straight/curved
+  paths, TikZ joins/control segments) passed.
+
+---
+
 ## 2026-06-26 — Fix dvisvgm PDF→SVG in Docker (install mutool)
 
 - On the Docker/Railway image `dvisvgm --pdf` failed: "either Ghostscript <

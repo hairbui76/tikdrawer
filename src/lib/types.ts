@@ -1,5 +1,6 @@
 export type Tool =
   | "select"
+  | "anchor"
   | "line"
   | "rect"
   | "circle"
@@ -81,10 +82,10 @@ export type ConnectorShape = {
   kind: "connector";
   from: Endpoint;
   to: Endpoint;
-  /** When true, render as a quadratic Bézier through `control`. */
+  /** Intermediate bend points between `from` and `to` (canvas px). */
+  waypoints: Point[];
+  /** true = smooth curve through the points; false = straight segments (zig-zag). */
   curved: boolean;
-  /** Quadratic Bézier control point (used only when `curved`). */
-  control: Point;
   style: Style;
 };
 

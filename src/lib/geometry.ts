@@ -108,7 +108,6 @@ const MAX_PER_EDGE = 6;
 const MIN_ROUND = 8;
 const MAX_ROUND = 24;
 
-const clampInt = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, Math.round(n)));
 
 /**
  * The discrete connection ports of a shape, evenly distributed around its
@@ -127,7 +126,9 @@ export function portsOf(s: Shape): PortPoint[] {
     const rx = s.kind === "circle" ? s.r : s.rx;
     const ry = s.kind === "circle" ? s.r : s.ry;
     const circumference = 2 * Math.PI * ((rx + ry) / 2);
-    const n = clampInt(circumference / PORT_SPACING, MIN_ROUND, MAX_ROUND);
+    // Force a multiple of 8 so N/S/E/W + the 4 diagonals are always present.
+    let n = Math.round(Math.round(circumference / PORT_SPACING) / 8) * 8;
+    n = Math.min(MAX_ROUND, Math.max(MIN_ROUND, n));
     const out: PortPoint[] = [];
     for (let i = 0; i < n; i++) {
       const a = (i / n) * Math.PI * 2;
@@ -157,7 +158,11 @@ export function portsOf(s: Shape): PortPoint[] {
     const a = corners[i];
     const b = corners[(i + 1) % 4];
     const len = Math.hypot(b.x - a.x, b.y - a.y);
-    const k = clampInt(len / PORT_SPACING, MIN_PER_EDGE, MAX_PER_EDGE);
+    // Force an even count so the corner (t=0) AND edge midpoint (t=0.5) are
+    // always present; extra points fill in evenly for longer edges.
+    let k = Math.round(len / PORT_SPACING);
+    if (k % 2 === 1) k += 1;
+    k = Math.min(MAX_PER_EDGE, Math.max(MIN_PER_EDGE, k));
     for (let j = 0; j < k; j++) {
       const t = j / k;
       out.push(toPort({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }));
@@ -268,10 +273,21 @@ export function nearestPort(s: Shape, p: Point): PortPoint {
   return best;
 }
 
-/** Resolve where one connector end sits on its shape. */
+/** Nearest cardinal side (N/S/E/W) of a shape toward a point (rotation-aware). */
+export function nearestCardinalSide(s: Shape, target: Point): Side {
+  const idx = ((Math.round(angleOf(s, target) / (Math.PI / 2)) % 4) + 4) % 4;
+  return (["e", "s", "w", "n"] as const)[idx];
+}
+
+/**
+ * Resolve where one connector end sits on its shape. `auto` is a DYNAMIC anchor:
+ * it snaps to the centre of the side facing the other end / next bend, so it
+ * moves to the appropriate edge as the route changes. A numeric `attach` is a
+ * fixed angle on the boundary.
+ */
 export function attachPoint(s: Shape, attach: Attach, otherCenter: Point): Point {
   return attach === "auto" || attach === undefined
-    ? anchorOnShape(s, otherCenter)
+    ? sidePoint(s, nearestCardinalSide(s, otherCenter))
     : boundaryAtAngle(s, attach);
 }
 
@@ -350,37 +366,69 @@ export function resolveConnector(
   c: ConnectorShape,
   byId: Map<string, Shape>,
 ): { a: Point; b: Point } {
+  const wp = c.waypoints ?? [];
   const fromShape = c.from.anchor ? byId.get(c.from.anchor) : undefined;
   const toShape = c.to.anchor ? byId.get(c.to.anchor) : undefined;
   const fromCenter = fromShape ? shapeCenter(fromShape) : c.from.point;
   const toCenter = toShape ? shapeCenter(toShape) : c.to.point;
-
-  const resolve = (
-    ep: ConnectorShape["from"],
-    shape: Shape | undefined,
-    otherCenter: Point,
-  ): Point => {
-    if (!shape) return ep.point;
-    return attachPoint(shape, ep.attach ?? "auto", otherCenter);
-  };
-
-  return {
-    a: resolve(c.from, fromShape, toCenter),
-    b: resolve(c.to, toShape, fromCenter),
-  };
+  // Auto-attached ends face the next point along the path.
+  const fromTarget = wp[0] ?? toCenter;
+  const toTarget = wp[wp.length - 1] ?? fromCenter;
+  const a = fromShape ? attachPoint(fromShape, c.from.attach ?? "auto", fromTarget) : c.from.point;
+  const b = toShape ? attachPoint(toShape, c.to.attach ?? "auto", toTarget) : c.to.point;
+  return { a, b };
 }
 
-/** The effective control point: the stored one when curved, else the midpoint. */
-export function connectorControl(c: ConnectorShape, a: Point, b: Point): Point {
-  return c.curved ? c.control : mid(a, b);
+/** Full polyline of a connector: resolved start + waypoints + resolved end. */
+export function connectorPoints(c: ConnectorShape, byId: Map<string, Shape>): Point[] {
+  const { a, b } = resolveConnector(c, byId);
+  return [a, ...(c.waypoints ?? []), b];
 }
 
-/** Convert a quadratic control point into the two cubic Bézier controls. */
-export function quadToCubic(p0: Point, cp: Point, p1: Point): { c1: Point; c2: Point } {
-  return {
-    c1: { x: p0.x + (2 / 3) * (cp.x - p0.x), y: p0.y + (2 / 3) * (cp.y - p0.y) },
-    c2: { x: p1.x + (2 / 3) * (cp.x - p1.x), y: p1.y + (2 / 3) * (cp.y - p1.y) },
-  };
+/** Catmull-Rom → cubic Bézier controls, one {c1,c2} per segment (n-1 of them). */
+export function smoothControls(pts: Point[]): { c1: Point; c2: Point }[] {
+  const segs: { c1: Point; c2: Point }[] = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i - 1] ?? pts[i];
+    const p1 = pts[i];
+    const p2 = pts[i + 1];
+    const p3 = pts[i + 2] ?? pts[i + 1];
+    segs.push({
+      c1: { x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6 },
+      c2: { x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6 },
+    });
+  }
+  return segs;
+}
+
+/** Closest point on a polyline to `p` — its position, segment index, distance. */
+export function nearestOnPolyline(pts: Point[], p: Point): { point: Point; seg: number; dist: number } {
+  let best = { point: pts[0] ?? p, seg: 0, dist: Infinity };
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i];
+    const b = pts[i + 1];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len2 = dx * dx + dy * dy || 1;
+    const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2));
+    const proj = { x: a.x + dx * t, y: a.y + dy * t };
+    const d = Math.hypot(p.x - proj.x, p.y - proj.y);
+    if (d < best.dist) best = { point: proj, seg: i, dist: d };
+  }
+  return best;
+}
+
+/** SVG path `d` through points: straight segments or a smooth curve. */
+export function svgPath(pts: Point[], curved: boolean): string {
+  if (pts.length < 2) return "";
+  if (!curved) return `M ${pts.map((p) => `${p.x} ${p.y}`).join(" L ")}`;
+  const segs = smoothControls(pts);
+  let d = `M ${pts[0].x} ${pts[0].y}`;
+  segs.forEach((s, i) => {
+    const e = pts[i + 1];
+    d += ` C ${s.c1.x} ${s.c1.y} ${s.c2.x} ${s.c2.y} ${e.x} ${e.y}`;
+  });
+  return d;
 }
 
 /** Whether a point falls inside a shape (anchor targets only). */

@@ -20,8 +20,8 @@ function conn(from: string, fromSide: Side, to: string, toSide: Side, curved = f
     kind: "connector",
     from: { point: ORIGIN, anchor: from, attach: sideToAngle(fromSide) },
     to: { point: ORIGIN, anchor: to, attach: sideToAngle(toSide) },
+    waypoints: [],
     curved,
-    control: ORIGIN,
     style: { ...DEFAULT_STYLE, arrow: "->", stroke: "#334155" },
   };
 }
@@ -65,8 +65,8 @@ export const TEMPLATES: Template[] = [
       return [
         box(client, 80, 250, 280, 330, "#1d4ed8"), label(180, 290, "Client", "#1d4ed8"),
         box(server, 520, 250, 720, 330, "#dc2626"), label(620, 290, "Server", "#dc2626"),
-        { ...(conn(client, "e", server, "w", true) as Shape & { kind: "connector" }), control: { x: 400, y: 220 } },
-        { ...(conn(server, "w", client, "e", true) as Shape & { kind: "connector" }), control: { x: 400, y: 360 } },
+        { ...(conn(client, "e", server, "w", true) as Shape & { kind: "connector" }), waypoints: [{ x: 400, y: 220 }] },
+        { ...(conn(server, "w", client, "e", true) as Shape & { kind: "connector" }), waypoints: [{ x: 400, y: 360 }] },
       ];
     },
   },

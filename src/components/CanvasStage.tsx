@@ -6,16 +6,17 @@ import { fileToAsset } from "@/lib/images";
 import {
   anchorOnShape,
   angleOf,
-  connectorControl,
+  connectorPoints,
+  nearestOnPolyline,
   nearestPort,
   portsOf,
-  resolveConnector,
   rotatePoint,
   rotationOf,
   setBox,
   shapeAtPoint,
   shapeCenter,
   sizeOf,
+  svgPath,
   type PortPoint,
 } from "@/lib/geometry";
 import { useShapes, useStore } from "@/lib/store";
@@ -24,6 +25,7 @@ import {
   type ConnectorShape,
   type Endpoint,
   type Point,
+  type PolygonShape,
   type Shape,
   type Tool,
 } from "@/lib/types";
@@ -108,7 +110,7 @@ function translate(s: Shape, dx: number, dy: number): Partial<Shape> {
       return {
         from: { ...s.from, point: mv(s.from.point) },
         to: { ...s.to, point: mv(s.to.point) },
-        control: mv(s.control),
+        waypoints: (s.waypoints ?? []).map(mv),
       } as Partial<Shape>;
   }
 }
@@ -326,7 +328,6 @@ function ConnectorView({
   byId: Map<string, Shape>;
   selectMode: boolean;
 }) {
-  const { a, b } = resolveConnector(connector, byId);
   const st = connector.style;
   const common = {
     stroke: st.stroke,
@@ -339,9 +340,7 @@ function ConnectorView({
   const markerEnd = st.arrow === "->" || st.arrow === "<->" ? "url(#arrow)" : undefined;
   const markerStart = st.arrow === "<-" || st.arrow === "<->" ? "url(#arrowStart)" : undefined;
 
-  const d = connector.curved
-    ? `M ${a.x} ${a.y} Q ${connector.control.x} ${connector.control.y} ${b.x} ${b.y}`
-    : `M ${a.x} ${a.y} L ${b.x} ${b.y}`;
+  const d = svgPath(connectorPoints(connector, byId), connector.curved);
 
   return (
     <>
@@ -358,7 +357,9 @@ const shapeText = (s: Shape): string | undefined => (s as { text?: string }).tex
 
 type Drag =
   | { type: "shape"; id: string; start: Point; origs: { id: string; shape: Shape }[] }
-  | { type: "control"; id: string; start: Point }
+  | { type: "waypoint"; id: string; index: number; start: Point }
+  | { type: "vertex"; id: string; index: number; start: Point }
+  | { type: "segment"; id: string; axis: "x" | "y"; li: number; ri: number; origWp: Point[]; start: Point }
   | { type: "endpoint"; id: string; end: "from" | "to"; start: Point }
   | { type: "rotate"; id: string; start: Point; center: Point }
   | {
@@ -425,10 +426,25 @@ export function CanvasStage() {
   const [hoverId, setHoverId] = useState<string | null>(null);
   // True while an image is being dragged over the canvas.
   const [dragOver, setDragOver] = useState(false);
+  // Anchor-tool hover marker: where a bend/vertex would be added.
+  const [anchorHover, setAnchorHover] = useState<Point | null>(null);
+
+  // Snap a point so it lines up (same x or y) with nearby neighbour points —
+  // makes orthogonal/zig-zag bends align with the shape's connection ports.
+  const ALIGN = 8;
+  const alignSnap = (p: Point, neighbors: Point[]): Point => {
+    let { x, y } = p;
+    for (const n of neighbors) {
+      if (Math.abs(x - n.x) <= ALIGN) x = n.x;
+      if (Math.abs(y - n.y) <= ALIGN) y = n.y;
+    }
+    return { x, y };
+  };
 
   // Clear connect-hover when switching to a drawing tool (kept for select/connector).
   useEffect(() => {
     if (tool !== "connector" && tool !== "select") setHoverId((cur) => (cur ? null : cur));
+    if (tool !== "anchor") setAnchorHover((cur) => (cur ? null : cur));
   }, [tool]);
 
   useEffect(() => {
@@ -598,6 +614,23 @@ export function CanvasStage() {
       svgRef.current?.setPointerCapture(e.pointerId);
       return;
     }
+
+    // Anchor tool: click a connector to add a bend, or a polygon to add a vertex.
+    if (tool === "anchor") {
+      const raw = clientToCanvas(e.clientX, e.clientY);
+      const conn = connectorHitTest(raw);
+      if (conn) {
+        selectShape(conn.conn.id);
+        addWaypoint(e, conn.conn, conn.seg, conn.point);
+        return;
+      }
+      const poly = polygonHitTest(raw);
+      if (poly) {
+        selectShape(poly.poly.id);
+        addPolygonVertex(e, poly.poly, poly.seg, poly.point);
+      }
+      return;
+    }
     const p = getPoint(e);
 
     if (tool === "node") {
@@ -633,8 +666,8 @@ export function CanvasStage() {
         kind: "connector",
         from,
         to: { point: p, anchor: null, attach: "auto" },
+        waypoints: [],
         curved: false,
-        control: p,
         style: { ...DEFAULT_STYLE, arrow: "->" },
       });
       svgRef.current?.setPointerCapture(e.pointerId);
@@ -649,6 +682,13 @@ export function CanvasStage() {
   function onShapeDown(e: React.PointerEvent, shape: Shape) {
     if (tool !== "select") return;
     e.stopPropagation();
+    // Shift + drag a connector = move the whole segment under the cursor.
+    if (shape.kind === "connector" && e.shiftKey) {
+      selectShape(shape.id);
+      const seg = nearestOnPolyline(connectorPoints(shape, byId), clientToCanvas(e.clientX, e.clientY)).seg;
+      onSegmentDown(e, shape, seg);
+      return;
+    }
     if (e.shiftKey) {
       toggleSelect(shape.id);
       return;
@@ -669,6 +709,118 @@ export function CanvasStage() {
     e.stopPropagation();
     setDrag(d);
     dragRecorded.current = false;
+    svgRef.current?.setPointerCapture(e.pointerId);
+  }
+
+  // Insert a bend point into segment `seg` (at `pos`) and start dragging it.
+  function addWaypoint(e: React.PointerEvent, conn: ConnectorShape, seg: number, pos: Point) {
+    e.stopPropagation();
+    beginChange();
+    const panchors = connectorPoints(conn, byId);
+    const snapped = alignSnap(pos, [panchors[seg], panchors[seg + 1]].filter(Boolean));
+    const wp = [...(conn.waypoints ?? [])];
+    wp.splice(seg, 0, snapped);
+    updateShape(conn.id, { waypoints: wp });
+    setDrag({ type: "waypoint", id: conn.id, index: seg, start: pos });
+    dragRecorded.current = true; // already recorded by beginChange
+    svgRef.current?.setPointerCapture(e.pointerId);
+  }
+
+  function removeWaypoint(conn: ConnectorShape, index: number) {
+    beginChange();
+    updateShape(conn.id, { waypoints: (conn.waypoints ?? []).filter((_, i) => i !== index) });
+  }
+
+  // Closest connector to a world point (within 10px), with segment + point.
+  function connectorHitTest(p: Point): { conn: ConnectorShape; seg: number; point: Point } | null {
+    let best: { conn: ConnectorShape; seg: number; point: Point } | null = null;
+    let bestD = 10;
+    for (const s of shapes) {
+      if (s.kind !== "connector") continue;
+      const near = nearestOnPolyline(connectorPoints(s, byId), p);
+      if (near.dist < bestD) {
+        bestD = near.dist;
+        best = { conn: s, seg: near.seg, point: near.point };
+      }
+    }
+    return best;
+  }
+
+  // Polygon vertices in LOCAL (unrotated) coords; a closed polygon repeats p0.
+  function polygonRing(poly: PolygonShape): Point[] {
+    return poly.closed && poly.points.length ? [...poly.points, poly.points[0]] : poly.points;
+  }
+
+  // Closest polygon edge to a world point (within 10px), with edge index + world point.
+  function polygonHitTest(p: Point): { poly: PolygonShape; seg: number; point: Point } | null {
+    let best: { poly: PolygonShape; seg: number; point: Point } | null = null;
+    let bestD = 10;
+    for (const s of shapes) {
+      if (s.kind !== "polygon" || s.points.length < 2) continue;
+      const center = shapeCenter(s);
+      const rot = rotationOf(s);
+      const near = nearestOnPolyline(polygonRing(s), rotatePoint(p, center, -rot));
+      if (near.dist < bestD) {
+        bestD = near.dist;
+        best = { poly: s, seg: near.seg, point: rotatePoint(near.point, center, rot) };
+      }
+    }
+    return best;
+  }
+
+  // Insert a vertex into a polygon edge (at world `pos`) and start dragging it.
+  function addPolygonVertex(e: React.PointerEvent, poly: PolygonShape, seg: number, pos: Point) {
+    e.stopPropagation();
+    beginChange();
+    const lp = rotatePoint(pos, shapeCenter(poly), -rotationOf(poly));
+    const pts = [...poly.points];
+    pts.splice(seg + 1, 0, lp);
+    updateShape(poly.id, { points: pts });
+    setDrag({ type: "vertex", id: poly.id, index: seg + 1, start: pos });
+    dragRecorded.current = true;
+    svgRef.current?.setPointerCapture(e.pointerId);
+  }
+
+  function removePolygonVertex(poly: PolygonShape, index: number) {
+    if (poly.points.length <= 2) return;
+    beginChange();
+    updateShape(poly.id, { points: poly.points.filter((_, i) => i !== index) });
+  }
+
+  // Grab a whole segment and translate it perpendicular (draw.io style). Stubs
+  // are inserted at port ends so the shapes stay connected while it moves.
+  function onSegmentDown(e: React.PointerEvent, conn: ConnectorShape, s: number) {
+    e.stopPropagation();
+    const full = connectorPoints(conn, byId);
+    const a = full[0];
+    const b = full[full.length - 1];
+    const wp = [...(conn.waypoints ?? [])];
+    const k = wp.length;
+    const axis: "x" | "y" = Math.abs(full[s + 1].y - full[s].y) < Math.abs(full[s + 1].x - full[s].x) ? "y" : "x";
+    let newWp: Point[];
+    let li: number;
+    let ri: number;
+    if (s >= 1 && s <= k - 1) {
+      newWp = wp;
+      li = s - 1;
+      ri = s;
+    } else if (s === 0 && s === k) {
+      newWp = [{ ...a }, { ...b }];
+      li = 0;
+      ri = 1;
+    } else if (s === 0) {
+      newWp = [{ ...a }, ...wp];
+      li = 0;
+      ri = 1;
+    } else {
+      newWp = [...wp, { ...b }];
+      li = k - 1;
+      ri = k;
+    }
+    beginChange();
+    updateShape(conn.id, { waypoints: newWp });
+    setDrag({ type: "segment", id: conn.id, axis, li, ri, origWp: newWp, start: clampPt(clientToCanvas(e.clientX, e.clientY)) });
+    dragRecorded.current = true;
     svgRef.current?.setPointerCapture(e.pointerId);
   }
 
@@ -705,8 +857,8 @@ export function CanvasStage() {
       kind: "connector",
       from: { point: port.point, anchor: shape.id, attach: port.attach },
       to: { point: port.point, anchor: null, attach: "auto" },
+      waypoints: [],
       curved: false,
-      control: port.point,
       style: { ...DEFAULT_STYLE, arrow: "->" },
     });
     svgRef.current?.setPointerCapture(e.pointerId);
@@ -723,7 +875,60 @@ export function CanvasStage() {
       setHoverId(connectTarget(getPoint(e))?.id ?? null);
       return;
     }
+    // Anchor tool: preview where a bend/vertex would be added.
+    if (tool === "anchor" && !drag) {
+      const raw = clientToCanvas(e.clientX, e.clientY);
+      const hit = connectorHitTest(raw) ?? polygonHitTest(raw);
+      setAnchorHover(hit ? hit.point : null);
+      return;
+    }
     if (drag) {
+      // Segment drag: translate the whole segment perpendicular (draw.io style).
+      if (drag.type === "segment") {
+        recordOnce();
+        const cur = clampPt(clientToCanvas(e.clientX, e.clientY));
+        const dx = cur.x - drag.start.x;
+        const dy = cur.y - drag.start.y;
+        const wp = drag.origWp.map((p, idx) =>
+          idx === drag.li || idx === drag.ri
+            ? drag.axis === "y"
+              ? { x: p.x, y: p.y + dy }
+              : { x: p.x + dx, y: p.y }
+            : p,
+        );
+        updateShape(drag.id, { waypoints: wp });
+        return;
+      }
+      // Polygon vertex drag (local frame + align to neighbour vertices).
+      if (drag.type === "vertex") {
+        recordOnce();
+        const c = shapes.find((s) => s.id === drag.id);
+        if (c && c.kind === "polygon") {
+          const center = shapeCenter(c);
+          const rot = rotationOf(c);
+          const local = rotatePoint(clampPt(clientToCanvas(e.clientX, e.clientY)), center, -rot);
+          const neighbors = [c.points[drag.index - 1], c.points[drag.index + 1]].filter(Boolean) as Point[];
+          const pts = [...c.points];
+          pts[drag.index] = alignSnap(local, neighbors);
+          updateShape(drag.id, { points: pts });
+        }
+        return;
+      }
+      // Waypoint drag: align to neighbours (no grid snap) for clean zig-zags.
+      if (drag.type === "waypoint") {
+        recordOnce();
+        const c = shapes.find((s) => s.id === drag.id);
+        if (c && c.kind === "connector") {
+          const pts = connectorPoints(c, byId);
+          const fi = drag.index + 1;
+          const neighbors = [pts[fi - 1], pts[fi + 1]].filter(Boolean) as Point[];
+          const snapped = alignSnap(clampPt(clientToCanvas(e.clientX, e.clientY)), neighbors);
+          const wp = [...(c.waypoints ?? [])];
+          wp[drag.index] = snapped;
+          updateShape(drag.id, { waypoints: wp });
+        }
+        return;
+      }
       const p = getPoint(e);
       if (drag.type === "marquee") {
         setMarquee({
@@ -744,9 +949,6 @@ export function CanvasStage() {
           for (const o of drag.origs) updateShape(o.id, translate(o.shape, dx, dy));
           break;
         }
-        case "control":
-          updateShape(drag.id, { curved: true, control: p });
-          break;
         case "rotate": {
           let deg = (Math.atan2(p.y - drag.center.y, p.x - drag.center.x) * 180) / Math.PI + 90;
           if (snap) deg = Math.round(deg / 15) * 15; // snap to 15° steps
@@ -803,13 +1005,9 @@ export function CanvasStage() {
           const hit = (s: Shape): boolean => {
             let b = bbox(s);
             if (s.kind === "connector") {
-              const { a, c } = (() => {
-                const res = resolveConnector(s, byId);
-                const ctrl = connectorControl(s, res.a, res.b);
-                return { a: res, c: ctrl };
-              })();
-              const xs = [a.a.x, a.b.x, c.x];
-              const ys = [a.a.y, a.b.y, c.y];
+              const pts = connectorPoints(s, byId);
+              const xs = pts.map((p) => p.x);
+              const ys = pts.map((p) => p.y);
               b = { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
             }
             return !(r.x > b.x + b.w || r.x + r.w < b.x || r.y > b.y + b.h || r.y + r.h < b.y);
@@ -862,9 +1060,12 @@ export function CanvasStage() {
   // Connection ports show on HOVER (select tool) — like draw.io — so selection
   // can stay focused on resize/rotate. Hidden while dragging or drafting.
   const hoveredShape = hoverId ? shapes.find((s) => s.id === hoverId) : undefined;
+  // Ports show on hover only when nothing is selected — once a shape is
+  // selected we're in transform mode (resize/rotate handles only).
   const portShape =
     hoveredShape &&
     tool === "select" &&
+    selectedIds.length === 0 &&
     hoveredShape.kind !== "connector" &&
     hoveredShape.kind !== "line" &&
     !draft &&
@@ -872,7 +1073,11 @@ export function CanvasStage() {
       ? hoveredShape
       : null;
   const rotShape = selected && tool === "select" && ROTATABLE.has(selected.kind) && !draft ? selected : null;
-  const resizeSel = selected && tool === "select" && !draft && sizeOf(selected) ? selected : null;
+  // Polygons are edited via vertex handles (custom shape), not bbox resize.
+  const resizeSel =
+    selected && tool === "select" && !draft && selected.kind !== "polygon" && sizeOf(selected) ? selected : null;
+  const polyVertexShape =
+    selected && tool === "select" && selected.kind === "polygon" && !draft ? selected : null;
 
   return (
     <div
@@ -1047,42 +1252,36 @@ export function CanvasStage() {
 
         {selectedConnector &&
           (() => {
-            const { a, b } = resolveConnector(selectedConnector, byId);
-            const ctrl = connectorControl(selectedConnector, a, b);
+            const pts = connectorPoints(selectedConnector, byId);
+            const wp = selectedConnector.waypoints ?? [];
+            const a = pts[0];
+            const b = pts[pts.length - 1];
             return (
               <g>
-                <line x1={a.x} y1={a.y} x2={ctrl.x} y2={ctrl.y} stroke="#0ea5e9" strokeWidth={0.75} strokeDasharray="3 3" vectorEffect="non-scaling-stroke" pointerEvents="none" />
-                <line x1={b.x} y1={b.y} x2={ctrl.x} y2={ctrl.y} stroke="#0ea5e9" strokeWidth={0.75} strokeDasharray="3 3" vectorEffect="non-scaling-stroke" pointerEvents="none" />
-                <circle
-                  cx={ctrl.x}
-                  cy={ctrl.y}
-                  r={6}
-                  fill="#0ea5e9"
-                  stroke="#fff"
-                  strokeWidth={1.5}
-                  style={{ cursor: "grab" }}
-                  onPointerDown={(e) => onHandleDown(e, { type: "control", id: selectedConnector.id, start: getPoint(e) })}
-                />
-                <circle
-                  cx={a.x}
-                  cy={a.y}
-                  r={5}
-                  fill="#fff"
-                  stroke="#0ea5e9"
-                  strokeWidth={1.5}
-                  style={{ cursor: "move" }}
-                  onPointerDown={(e) => onHandleDown(e, { type: "endpoint", id: selectedConnector.id, end: "from", start: getPoint(e) })}
-                />
-                <circle
-                  cx={b.x}
-                  cy={b.y}
-                  r={5}
-                  fill="#fff"
-                  stroke="#0ea5e9"
-                  strokeWidth={1.5}
-                  style={{ cursor: "move" }}
-                  onPointerDown={(e) => onHandleDown(e, { type: "endpoint", id: selectedConnector.id, end: "to", start: getPoint(e) })}
-                />
+                {/* bend points: white squares — drag to move this point freely,
+                    double-click to remove. (Distinct from the blue segment dots.) */}
+                {wp.map((w, i) => (
+                  <rect
+                    key={`wp${i}`}
+                    x={w.x - 5}
+                    y={w.y - 5}
+                    width={10}
+                    height={10}
+                    rx={1.5}
+                    fill="#fff"
+                    stroke="#0ea5e9"
+                    strokeWidth={1.75}
+                    style={{ cursor: "move" }}
+                    onPointerDown={(e) => onHandleDown(e, { type: "waypoint", id: selectedConnector.id, index: i, start: getPoint(e) })}
+                    onDoubleClick={(e) => {
+                      e.stopPropagation();
+                      removeWaypoint(selectedConnector, i);
+                    }}
+                  />
+                ))}
+                {/* endpoints */}
+                <circle cx={a.x} cy={a.y} r={5} fill="#fff" stroke="#0ea5e9" strokeWidth={1.5} style={{ cursor: "move" }} onPointerDown={(e) => onHandleDown(e, { type: "endpoint", id: selectedConnector.id, end: "from", start: getPoint(e) })} />
+                <circle cx={b.x} cy={b.y} r={5} fill="#fff" stroke="#0ea5e9" strokeWidth={1.5} style={{ cursor: "move" }} onPointerDown={(e) => onHandleDown(e, { type: "endpoint", id: selectedConnector.id, end: "to", start: getPoint(e) })} />
               </g>
             );
           })()}
@@ -1160,6 +1359,46 @@ export function CanvasStage() {
               </g>
             );
           })()}
+
+        {polyVertexShape &&
+          (() => {
+            const c = shapeCenter(polyVertexShape);
+            const rot = rotationOf(polyVertexShape);
+            return (
+              <g>
+                {polyVertexShape.points.map((pt, i) => {
+                  const w = rotatePoint(pt, c, rot);
+                  return (
+                    <rect
+                      key={`pv${i}`}
+                      x={w.x - 5}
+                      y={w.y - 5}
+                      width={10}
+                      height={10}
+                      rx={1.5}
+                      fill="#fff"
+                      stroke="#0ea5e9"
+                      strokeWidth={1.75}
+                      style={{ cursor: "move" }}
+                      onPointerDown={(e) => onHandleDown(e, { type: "vertex", id: polyVertexShape.id, index: i, start: getPoint(e) })}
+                      onDoubleClick={(e) => {
+                        e.stopPropagation();
+                        removePolygonVertex(polyVertexShape, i);
+                      }}
+                    />
+                  );
+                })}
+              </g>
+            );
+          })()}
+
+        {tool === "anchor" && anchorHover && (
+          <g pointerEvents="none">
+            <circle cx={anchorHover.x} cy={anchorHover.y} r={7} fill="#fff" stroke="#0ea5e9" strokeWidth={1.5} />
+            <line x1={anchorHover.x - 3.5} y1={anchorHover.y} x2={anchorHover.x + 3.5} y2={anchorHover.y} stroke="#0ea5e9" strokeWidth={1.5} />
+            <line x1={anchorHover.x} y1={anchorHover.y - 3.5} x2={anchorHover.x} y2={anchorHover.y + 3.5} stroke="#0ea5e9" strokeWidth={1.5} />
+          </g>
+        )}
       </svg>
     </div>
   );

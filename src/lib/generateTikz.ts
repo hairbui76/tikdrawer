@@ -1,5 +1,5 @@
 import { fmtUnit, lenToCm, pxToCmX, pxToCmY, round, type Unit } from "./coords";
-import { connectorControl, quadToCubic, resolveConnector, shapeCenter } from "./geometry";
+import { connectorPoints, shapeCenter, smoothControls } from "./geometry";
 import { imageFileName } from "./images";
 import type { ImageAsset, Point, Shape, Style } from "./types";
 
@@ -63,13 +63,17 @@ export function shapeToTikz(
       return `\\node[text=${tikzColor(s.style.stroke)}${fillOpt}${rotNode(s.rotation)}] at ${coord(s.at.x, s.at.y, u)} {${s.text}};`;
     }
     case "connector": {
-      const { a, b } = resolveConnector(s, byId);
+      const pts = connectorPoints(s, byId);
       const opts = styleOpts(s.style, { arrow: true });
-      if (s.curved) {
-        const { c1, c2 } = quadToCubic(a, s.control, b);
-        return `\\draw[${opts}] ${coordP(a, u)} .. controls ${coordP(c1, u)} and ${coordP(c2, u)} .. ${coordP(b, u)};`;
+      if (s.curved && pts.length >= 2) {
+        const segs = smoothControls(pts);
+        let path = coordP(pts[0], u);
+        segs.forEach((c, i) => {
+          path += ` .. controls ${coordP(c.c1, u)} and ${coordP(c.c2, u)} .. ${coordP(pts[i + 1], u)}`;
+        });
+        return `\\draw[${opts}] ${path};`;
       }
-      return `\\draw[${opts}] ${coordP(a, u)} -- ${coordP(b, u)};`;
+      return `\\draw[${opts}] ${pts.map((p) => coordP(p, u)).join(" -- ")};`;
     }
     case "diamond": {
       const cx = (s.p1.x + s.p2.x) / 2;
@@ -134,6 +138,17 @@ export function generateTikz(shapes: Shape[], unit: Unit = "cm", images?: Map<st
 export function fullDocument(tikz: string): string {
   return [
     "\\documentclass[tikz,border=2pt]{standalone}",
+    // Unicode text support (e.g. Vietnamese "ớ", accents, symbols). Works with
+    // any engine: pdfLaTeX uses inputenc/fontenc (T5 = Vietnamese) + Latin
+    // Modern; XeLaTeX/LuaLaTeX use fontspec with a full Unicode font.
+    "\\usepackage{iftex}",
+    "\\ifPDFTeX",
+    "  \\usepackage[utf8]{inputenc}",
+    "  \\usepackage[T1,T5]{fontenc}",
+    "  \\usepackage{lmodern}",
+    "\\else",
+    "  \\usepackage{fontspec}",
+    "\\fi",
     "\\usepackage{graphicx}",
     "\\usepackage{tikz}",
     "\\usetikzlibrary{arrows.meta,calc,positioning,patterns,shapes}",

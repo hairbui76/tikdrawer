@@ -1,3 +1,5 @@
+import { importSvg } from "./importSvg";
+import { importTikz } from "./importTikz";
 import type { Shape } from "./types";
 
 const FORMAT = "tikdrawer";
@@ -50,17 +52,55 @@ function downloadText(filename: string, text: string): void {
   URL.revokeObjectURL(url);
 }
 
-function parse(text: string): { name: string; shapes: Shape[] } | null {
-  try {
-    const data = JSON.parse(text);
-    if (data && Array.isArray(data.shapes)) {
-      return { name: typeof data.name === "string" ? data.name : "Imported", shapes: data.shapes as Shape[] };
+/** File kinds the "Open file" action accepts. `json` is a native drawing;
+ *  `tex`/`svg` are external files parsed into (editable) shapes. */
+type OpenKind = "json" | "tex" | "svg";
+
+/** Drop an extension and turn a filename into a drawing name. */
+function nameFromFile(filename: string): string {
+  return filename.replace(/\.(json|tex|tikz|svg)$/i, "").replace(/[_-]+/g, " ").trim() || "Imported";
+}
+
+/**
+ * Parse an opened file into a drawing. Detects the format from the filename and,
+ * as a fallback, the contents:
+ * - `.json` (TikDrawer native)   → shapes verbatim.
+ * - `.tex` / `.tikz` (tikzpicture) → parsed into editable shapes (importTikz).
+ * - `.svg`                         → parsed into editable shapes (importSvg).
+ */
+function parse(text: string, filename: string): { name: string; shapes: Shape[]; kind: OpenKind } | null {
+  const ext = /\.(json|tex|tikz|svg)$/i.exec(filename)?.[1]?.toLowerCase();
+
+  // Native JSON drawing.
+  if (ext === "json" || (!ext && text.trimStart().startsWith("{"))) {
+    try {
+      const data = JSON.parse(text);
+      if (data && Array.isArray(data.shapes)) {
+        return { name: typeof data.name === "string" ? data.name : nameFromFile(filename), shapes: data.shapes as Shape[], kind: "json" };
+      }
+    } catch {
+      /* not valid JSON — fall through to sniffing */
     }
-  } catch {
-    /* not valid JSON */
   }
+
+  // SVG (by extension or a leading <svg>/<?xml … svg).
+  if (ext === "svg" || /<svg[\s>]/i.test(text.slice(0, 500))) {
+    const shapes = importSvg(text);
+    if (shapes.length) return { name: nameFromFile(filename), shapes, kind: "svg" };
+  }
+
+  // TeX / TikZ (by extension or a tikzpicture / \draw / \node in the body).
+  if (ext === "tex" || ext === "tikz" || /\\begin\{tikzpicture\}|\\draw|\\node/.test(text)) {
+    const shapes = importTikz(text);
+    if (shapes.length) return { name: nameFromFile(filename), shapes, kind: "tex" };
+  }
+
   return null;
 }
+
+const OPEN_ACCEPT_TYPES = [
+  { description: "Drawing / TikZ / SVG", accept: { "application/json": [".json"], "text/x-tex": [".tex", ".tikz"], "image/svg+xml": [".svg"] } },
+];
 
 export type SaveResult = "saved" | "cancelled" | "downloaded";
 
@@ -96,17 +136,22 @@ export async function saveProjectToFile(
   return "downloaded";
 }
 
-/** Open a drawing file from disk. Returns its contents (and a handle when the
- *  File System Access API is available, so later saves overwrite that file). */
-export async function openProjectFromFile(): Promise<{ name: string; shapes: Shape[]; handle?: FileSystemFileHandle } | null> {
+export type OpenResult = { name: string; shapes: Shape[]; kind: OpenKind; handle?: FileSystemFileHandle };
+
+/**
+ * Open a drawing / TikZ / SVG file from disk and parse it into shapes. A file
+ * handle is returned only for native `.json` drawings (so a later Save
+ * overwrites the same file); imported `.tex`/`.svg` files get no handle, so
+ * saving them prompts for a new `.tikz.json` instead of clobbering the source.
+ */
+export async function openProjectFromFile(): Promise<OpenResult | null> {
   if (supportsFS()) {
     try {
-      const [handle] = await fsWindow().showOpenFilePicker!({
-        types: [{ description: "TikDrawer drawing", accept: { "application/json": [".json"] } }],
-      });
+      const [handle] = await fsWindow().showOpenFilePicker!({ types: OPEN_ACCEPT_TYPES });
       const file = await handle.getFile();
-      const parsed = parse(await file.text());
-      return parsed ? { ...parsed, handle } : null;
+      const parsed = parse(await file.text(), file.name);
+      if (!parsed) return null;
+      return { ...parsed, handle: parsed.kind === "json" ? handle : undefined };
     } catch (e) {
       if ((e as DOMException)?.name === "AbortError") return null;
       // Fall through to the <input type=file> fallback.
@@ -115,10 +160,10 @@ export async function openProjectFromFile(): Promise<{ name: string; shapes: Sha
   return new Promise((resolve) => {
     const input = document.createElement("input");
     input.type = "file";
-    input.accept = "application/json,.json";
+    input.accept = ".json,.tex,.tikz,.svg,application/json,image/svg+xml";
     input.onchange = async () => {
       const file = input.files?.[0];
-      resolve(file ? parse(await file.text()) : null);
+      resolve(file ? parse(await file.text(), file.name) : null);
     };
     input.click();
   });

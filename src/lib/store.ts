@@ -438,7 +438,7 @@ function shiftShape(s: Shape, dx: number, dy: number): Shape {
         ...s,
         from: { ...s.from, point: mv(s.from.point) },
         to: { ...s.to, point: mv(s.to.point) },
-        control: mv(s.control),
+        waypoints: (s.waypoints ?? []).map(mv),
       };
   }
 }

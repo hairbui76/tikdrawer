@@ -31,6 +31,14 @@ export const pxToCmY = (y: number): number => round((CANVAS_H - y) / PX_PER_CM);
 /** Convert a length (px) to cm (no flip). */
 export const lenToCm = (n: number): number => round(n / PX_PER_CM);
 
+/** Inverse conversions (cm → canvas px), used when importing external TikZ. */
+/** TikZ cm X → canvas X (px, origin top-left). */
+export const cmToPxX = (cm: number): number => round(cm * PX_PER_CM);
+/** TikZ cm Y → canvas Y (px). TikZ Y grows up, so flip around the height. */
+export const cmToPxY = (cm: number): number => round(CANVAS_H - cm * PX_PER_CM);
+/** A length in cm → px (no flip). */
+export const cmToLen = (cm: number): number => round(cm * PX_PER_CM);
+
 export const snapToGrid = (n: number): number => Math.round(n / GRID) * GRID;
 
 export const dist = (a: Point, b: Point): number => Math.hypot(a.x - b.x, a.y - b.y);

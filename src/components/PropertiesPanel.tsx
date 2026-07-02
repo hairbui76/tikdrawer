@@ -414,19 +414,22 @@ export function PropertiesPanel() {
 						</select>
 					</label>
 
-					{shape.curved && (
-						<button
-							onClick={() => {
+					<label className="flex items-center justify-between gap-2">
+						<span className="text-slate-600">Curved</span>
+						<input
+							type="checkbox"
+							checked={shape.curved}
+							onChange={(e) => {
 								beginChange();
-								updateShape(shape.id, { curved: false });
+								updateShape(shape.id, { curved: e.target.checked });
 							}}
-							className="rounded border border-slate-300 bg-white px-2 py-1 hover:bg-slate-100">
-							Straighten curve
-						</button>
-					)}
+						/>
+					</label>
 
 					<p className="px-1 text-xs text-slate-400">
-						Drag the blue dot on the line to bend it.
+						Drag a square to move that bend (double-click to remove). Hold Shift and
+						drag the line to move a whole segment. Use the Anchor tool (A) to add a
+						bend. Toggle Curved for smooth vs zig-zag.
 					</p>
 				</>
 			)}
