@@ -27,6 +27,8 @@ import {
   shapeAtPoint,
   shapeCenter,
   sizeOf,
+  scaleShape,
+  shapeBBox as bbox,
   svgPath,
   translateShape,
   type PortPoint,
@@ -97,39 +99,6 @@ function isValid(s: Shape): boolean {
       return (Boolean(s.from.anchor) && Boolean(s.to.anchor)) || dist(s.from.point, s.to.point) > 6;
     case "polygon":
       return s.points.length >= 2;
-  }
-}
-
-function bbox(s: Shape): { x: number; y: number; w: number; h: number } {
-  switch (s.kind) {
-    case "line":
-    case "rect":
-    case "diamond":
-    case "roundrect":
-    case "cylinder":
-    case "image": {
-      const x = Math.min(s.p1.x, s.p2.x);
-      const y = Math.min(s.p1.y, s.p2.y);
-      return { x, y, w: Math.abs(s.p2.x - s.p1.x), h: Math.abs(s.p2.y - s.p1.y) };
-    }
-    case "circle":
-      return { x: s.center.x - s.r, y: s.center.y - s.r, w: s.r * 2, h: s.r * 2 };
-    case "ellipse":
-      return { x: s.center.x - s.rx, y: s.center.y - s.ry, w: s.rx * 2, h: s.ry * 2 };
-    case "node": {
-      // Follow the label's real size so the selection box hugs the text.
-      const { hw, hh } = labelHalfSize(s.text, s.style);
-      return { x: s.at.x - hw, y: s.at.y - hh, w: hw * 2, h: hh * 2 };
-    }
-    case "polygon": {
-      if (!s.points.length) return { x: 0, y: 0, w: 0, h: 0 };
-      const xs = s.points.map((p) => p.x);
-      const ys = s.points.map((p) => p.y);
-      const x = Math.min(...xs), y = Math.min(...ys);
-      return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
-    }
-    case "connector":
-      return { x: 0, y: 0, w: 0, h: 0 };
   }
 }
 
@@ -366,6 +335,16 @@ type Drag =
        *  delta is applied to THIS, then snapped, so the resize never depends
        *  on where within the handle you grabbed. */
       corner0: Point;
+    }
+  | {
+      /** Scale every selected shape about the corner opposite the handle. */
+      type: "groupscale";
+      start: Point;
+      fixed: Point;
+      corner0: Point;
+      hx: number;
+      hy: number;
+      origs: { id: string; shape: Shape }[];
     }
   | { type: "marquee"; start: Point };
 
@@ -849,7 +828,9 @@ export function CanvasStage() {
       onSegmentDown(e, shape, seg);
       return;
     }
-    if (e.shiftKey) {
+    // Shift+click toggles selection — but with Alt held it starts a drag
+    // instead, so Shift+Alt = free movement locked to one axis (see onMove).
+    if (e.shiftKey && !e.altKey) {
       toggleSelect(shape.id);
       return;
     }
@@ -1013,6 +994,43 @@ export function CanvasStage() {
     svgRef.current?.setPointerCapture(e.pointerId);
   }
 
+  /** Combined bounds of shapes (connectors measured by their live points). */
+  function groupBounds(sel: Shape[]): { x: number; y: number; w: number; h: number } | null {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const s of sel) {
+      if (s.kind === "connector") {
+        for (const p of connectorPoints(s, byId)) {
+          x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y);
+          x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y);
+        }
+      } else {
+        const b = bbox(s);
+        x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y);
+        x1 = Math.max(x1, b.x + b.w); y1 = Math.max(y1, b.y + b.h);
+      }
+    }
+    if (!Number.isFinite(x0)) return null;
+    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  }
+
+  function onGroupScaleDown(e: React.PointerEvent, hx: number, hy: number) {
+    e.stopPropagation();
+    const sel = shapes.filter((s) => selectedIds.includes(s.id));
+    const b = groupBounds(sel);
+    if (!b) return;
+    setDrag({
+      type: "groupscale",
+      start: getRawPoint(e),
+      fixed: { x: b.x + ((-hx + 1) / 2) * b.w, y: b.y + ((-hy + 1) / 2) * b.h },
+      corner0: { x: b.x + ((hx + 1) / 2) * b.w, y: b.y + ((hy + 1) / 2) * b.h },
+      hx,
+      hy,
+      origs: sel.map((s) => ({ id: s.id, shape: s })),
+    });
+    dragRecorded.current = false;
+    svgRef.current?.setPointerCapture(e.pointerId);
+  }
+
   // Start a connector from one of a shape's ports (drag onto another shape).
   function onPortDown(e: React.PointerEvent, shape: Shape, port: PortPoint) {
     e.stopPropagation();
@@ -1117,8 +1135,15 @@ export function CanvasStage() {
       recordOnce();
       switch (drag.type) {
         case "shape": {
-          const rawDx = raw.x - drag.start.x;
-          const rawDy = raw.y - drag.start.y;
+          let rawDx = raw.x - drag.start.x;
+          let rawDy = raw.y - drag.start.y;
+          // Shift locks the move to the dominant axis (horizontal or
+          // vertical). Combines with Alt: Shift+Alt = free 1px movement
+          // along a straight line.
+          if (e.shiftKey) {
+            if (Math.abs(rawDx) >= Math.abs(rawDy)) rawDy = 0;
+            else rawDx = 0;
+          }
           let dx = rawDx;
           let dy = rawDy;
           if (snapWith(e)) {
@@ -1171,6 +1196,23 @@ export function CanvasStage() {
         case "endpoint": {
           const ep = endpointAt(p, drag.id);
           updateShape(drag.id, drag.end === "from" ? { from: ep } : { to: ep });
+          break;
+        }
+        case "groupscale": {
+          // Same corner-plus-raw-travel scheme as single resize; the factors
+          // then scale every shape about the opposite (fixed) corner.
+          let mx = drag.corner0.x + (raw.x - drag.start.x);
+          let my = drag.corner0.y + (raw.y - drag.start.y);
+          if (snapWith(e)) {
+            mx = snapToGrid(mx);
+            my = snapToGrid(my);
+          }
+          const denX = drag.corner0.x - drag.fixed.x;
+          const denY = drag.corner0.y - drag.fixed.y;
+          let kx = drag.hx && Math.abs(denX) > 1e-6 ? Math.max(0.02, (mx - drag.fixed.x) / denX) : 1;
+          let ky = drag.hy && Math.abs(denY) > 1e-6 ? Math.max(0.02, (my - drag.fixed.y) / denY) : 1;
+          if (lockAspect && drag.hx && drag.hy) ky = kx;
+          for (const o of drag.origs) updateShape(o.id, scaleShape(o.shape, drag.fixed, kx, ky));
           break;
         }
       }
@@ -1265,11 +1307,14 @@ export function CanvasStage() {
       ? hoveredShape
       : null;
   const rotShape = selected && tool === "select" && ROTATABLE.has(selected.kind) && !draft ? selected : null;
-  // Polygons are edited via vertex handles (custom shape), not bbox resize.
-  const resizeSel =
-    selected && tool === "select" && !draft && selected.kind !== "polygon" && sizeOf(selected) ? selected : null;
+  // Polygons get bbox resize like any box shape, plus their vertex handles
+  // (rendered underneath, so the corner handles stay grabbable).
+  const resizeSel = selected && tool === "select" && !draft && sizeOf(selected) ? selected : null;
   const polyVertexShape =
     selected && tool === "select" && selected.kind === "polygon" && !draft ? selected : null;
+  // Two or more shapes selected: scale the whole group via its bounds.
+  const groupSel = tool === "select" && selectedIds.length >= 2 && !draft && !editing ? selectedIds : null;
+  const groupBox = groupSel ? groupBounds(shapes.filter((s) => groupSel.includes(s.id))) : null;
 
   return (
     <div className="relative h-full w-full">
@@ -1547,38 +1592,6 @@ export function CanvasStage() {
                 );
               })()}
 
-            {resizeSel &&
-              (() => {
-                const size = sizeOf(resizeSel)!;
-                const c = shapeCenter(resizeSel);
-                const rot = rotationOf(resizeSel);
-                const hw = size.w / 2;
-                const hh = size.h / 2;
-                return (
-                  <g>
-                    {RESIZE_HANDLES.map(([hx, hy]) => {
-                      const wp = rotatePoint({ x: c.x + hx * hw, y: c.y + hy * hh }, c, rot);
-                      const cursor = hx && hy ? (hx === hy ? "nwse-resize" : "nesw-resize") : hx ? "ew-resize" : "ns-resize";
-                      return (
-                        <rect
-                          key={`${hx}_${hy}`}
-                          x={wp.x - hz(4)}
-                          y={wp.y - hz(4)}
-                          width={hz(8)}
-                          height={hz(8)}
-                          fill="#fff"
-                          stroke="#0ea5e9"
-                          strokeWidth={1.25}
-                          vectorEffect="non-scaling-stroke"
-                          style={{ cursor }}
-                          onPointerDown={(e) => onResizeDown(e, resizeSel, hx, hy)}
-                        />
-                      );
-                    })}
-                  </g>
-                );
-              })()}
-
             {polyVertexShape &&
               (() => {
                 const c = shapeCenter(polyVertexShape);
@@ -1611,6 +1624,77 @@ export function CanvasStage() {
                   </g>
                 );
               })()}
+
+            {resizeSel &&
+              (() => {
+                const size = sizeOf(resizeSel)!;
+                const c = shapeCenter(resizeSel);
+                const rot = rotationOf(resizeSel);
+                const hw = size.w / 2;
+                const hh = size.h / 2;
+                return (
+                  <g>
+                    {RESIZE_HANDLES.map(([hx, hy]) => {
+                      const wp = rotatePoint({ x: c.x + hx * hw, y: c.y + hy * hh }, c, rot);
+                      const cursor = hx && hy ? (hx === hy ? "nwse-resize" : "nesw-resize") : hx ? "ew-resize" : "ns-resize";
+                      return (
+                        <rect
+                          key={`${hx}_${hy}`}
+                          x={wp.x - hz(4)}
+                          y={wp.y - hz(4)}
+                          width={hz(8)}
+                          height={hz(8)}
+                          fill="#fff"
+                          stroke="#0ea5e9"
+                          strokeWidth={1.25}
+                          vectorEffect="non-scaling-stroke"
+                          style={{ cursor }}
+                          onPointerDown={(e) => onResizeDown(e, resizeSel, hx, hy)}
+                        />
+                      );
+                    })}
+                  </g>
+                );
+              })()}
+
+            {groupBox && (
+              <g>
+                <rect
+                  x={groupBox.x}
+                  y={groupBox.y}
+                  width={groupBox.w}
+                  height={groupBox.h}
+                  fill="none"
+                  stroke="#0ea5e9"
+                  strokeWidth={1}
+                  strokeDasharray="4 3"
+                  vectorEffect="non-scaling-stroke"
+                  pointerEvents="none"
+                />
+                {RESIZE_HANDLES.map(([hx, hy]) => {
+                  const wp = {
+                    x: groupBox.x + ((hx + 1) / 2) * groupBox.w,
+                    y: groupBox.y + ((hy + 1) / 2) * groupBox.h,
+                  };
+                  const cursor = hx && hy ? (hx === hy ? "nwse-resize" : "nesw-resize") : hx ? "ew-resize" : "ns-resize";
+                  return (
+                    <rect
+                      key={`g${hx}_${hy}`}
+                      x={wp.x - hz(4)}
+                      y={wp.y - hz(4)}
+                      width={hz(8)}
+                      height={hz(8)}
+                      fill="#fff"
+                      stroke="#0ea5e9"
+                      strokeWidth={1.25}
+                      vectorEffect="non-scaling-stroke"
+                      style={{ cursor }}
+                      onPointerDown={(e) => onGroupScaleDown(e, hx, hy)}
+                    />
+                  );
+                })}
+              </g>
+            )}
 
             {tool === "anchor" && anchorHover && (
               <g pointerEvents="none">

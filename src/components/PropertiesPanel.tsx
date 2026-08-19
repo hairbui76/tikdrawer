@@ -37,6 +37,58 @@ const TEXTABLE = new Set<Shape["kind"]>([
 const shapeText = (s: Shape): string | undefined =>
 	(s as { text?: string }).text;
 
+/** Tiny alignment glyph: reference edge/line + two bars aligned to it. */
+function AlignIcon({ mode }: { mode: string }) {
+	const s = { width: 14, height: 14, viewBox: "0 0 14 14", fill: "currentColor" };
+	switch (mode) {
+		case "left":
+			return <svg {...s}><rect x="1" y="1" width="1.5" height="12" /><rect x="3.5" y="2.5" width="8" height="3" /><rect x="3.5" y="8.5" width="5" height="3" /></svg>;
+		case "hcenter":
+			return <svg {...s}><rect x="6.25" y="1" width="1.5" height="12" /><rect x="3" y="2.5" width="8" height="3" /><rect x="4.5" y="8.5" width="5" height="3" /></svg>;
+		case "right":
+			return <svg {...s}><rect x="11.5" y="1" width="1.5" height="12" /><rect x="2.5" y="2.5" width="8" height="3" /><rect x="5.5" y="8.5" width="5" height="3" /></svg>;
+		case "top":
+			return <svg {...s}><rect x="1" y="1" width="12" height="1.5" /><rect x="2.5" y="3.5" width="3" height="8" /><rect x="8.5" y="3.5" width="3" height="5" /></svg>;
+		case "vcenter":
+			return <svg {...s}><rect x="1" y="6.25" width="12" height="1.5" /><rect x="2.5" y="3" width="3" height="8" /><rect x="8.5" y="4.5" width="3" height="5" /></svg>;
+		default:
+			return <svg {...s}><rect x="1" y="11.5" width="12" height="1.5" /><rect x="2.5" y="2.5" width="3" height="8" /><rect x="8.5" y="5.5" width="3" height="5" /></svg>;
+	}
+}
+
+const ALIGN_MODES: { mode: "left" | "hcenter" | "right" | "top" | "vcenter" | "bottom"; label: string }[] = [
+	{ mode: "left", label: "Align left" },
+	{ mode: "hcenter", label: "Center horizontally" },
+	{ mode: "right", label: "Align right" },
+	{ mode: "top", label: "Align top" },
+	{ mode: "vcenter", label: "Center vertically" },
+	{ mode: "bottom", label: "Align bottom" },
+];
+
+/** Six align buttons. One shape aligns to the canvas; several align to the
+ *  selection's combined bounds. */
+function AlignControls() {
+	const alignSelected = useStore((s) => s.alignSelected);
+	const single = useStore((s) => s.selectedIds.length === 1);
+	return (
+		<div className="flex flex-col gap-1">
+			<span className="px-1 text-slate-600">Align {single ? "to canvas" : "selection"}</span>
+			<div className="flex gap-1">
+				{ALIGN_MODES.map(({ mode, label }) => (
+					<button
+						key={mode}
+						title={label + (single ? " (of the canvas)" : "")}
+						aria-label={label}
+						onClick={() => alignSelected(mode)}
+						className="flex h-7 w-7 items-center justify-center rounded border border-slate-300 bg-white text-slate-600 hover:bg-slate-100">
+						<AlignIcon mode={mode} />
+					</button>
+				))}
+			</div>
+		</div>
+	);
+}
+
 /** Width/Height inputs with an aspect-ratio lock (chain) toggle. */
 function SizeControls({ shape }: { shape: Shape }) {
 	const updateShape = useStore((s) => s.updateShape);
@@ -133,6 +185,7 @@ export function PropertiesPanel() {
 				<h2 className="px-1 text-xs font-semibold uppercase tracking-wide text-slate-400">
 					{selectedIds.length} shapes selected
 				</h2>
+				<AlignControls />
 				<button
 					onClick={() => {
 						const name = window.prompt("Symbol name:", "My symbol");
@@ -175,6 +228,7 @@ export function PropertiesPanel() {
 					Properties · image
 				</h2>
 				<SizeControls shape={shape} />
+				<AlignControls />
 				<label className="flex flex-col gap-1">
 					<span className="text-slate-600">
 						Opacity · {shape.style.opacity.toFixed(2)}
@@ -227,6 +281,7 @@ export function PropertiesPanel() {
 			</h2>
 
 			{sizeOf(shape) && <SizeControls shape={shape} />}
+			<AlignControls />
 
 			{TEXTABLE.has(shape.kind) && (
 				<>

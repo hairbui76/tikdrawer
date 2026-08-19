@@ -296,6 +296,81 @@ export function setBox(s: Shape, center: Point, w: number, h: number): Partial<S
   }
 }
 
+/**
+ * Axis-aligned (unrotated) bounds of a shape. A connector has no box of its
+ * own (its geometry lives on its endpoints/waypoints) and reports 0-sized.
+ */
+export function shapeBBox(s: Shape): { x: number; y: number; w: number; h: number } {
+  switch (s.kind) {
+    case "line":
+    case "rect":
+    case "diamond":
+    case "roundrect":
+    case "cylinder":
+    case "image": {
+      const x = Math.min(s.p1.x, s.p2.x);
+      const y = Math.min(s.p1.y, s.p2.y);
+      return { x, y, w: Math.abs(s.p2.x - s.p1.x), h: Math.abs(s.p2.y - s.p1.y) };
+    }
+    case "circle":
+      return { x: s.center.x - s.r, y: s.center.y - s.r, w: s.r * 2, h: s.r * 2 };
+    case "ellipse":
+      return { x: s.center.x - s.rx, y: s.center.y - s.ry, w: s.rx * 2, h: s.ry * 2 };
+    case "node": {
+      // Follow the label's real size so the box hugs the text.
+      const { hw, hh } = labelHalfSize(s.text, s.style);
+      return { x: s.at.x - hw, y: s.at.y - hh, w: hw * 2, h: hh * 2 };
+    }
+    case "polygon": {
+      if (!s.points.length) return { x: 0, y: 0, w: 0, h: 0 };
+      const xs = s.points.map((p) => p.x);
+      const ys = s.points.map((p) => p.y);
+      const x = Math.min(...xs), y = Math.min(...ys);
+      return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
+    }
+    case "connector":
+      return { x: 0, y: 0, w: 0, h: 0 };
+  }
+}
+
+/**
+ * Patch that scales a shape about `origin` by (kx, ky) in world axes — group
+ * resize. Point-based shapes scale exactly; a rotated box shape scales its
+ * centre and dimensions (exact when unrotated, a fair approximation when not).
+ * Text keeps its size: labels stay readable however small the group gets.
+ */
+export function scaleShape(s: Shape, origin: Point, kx: number, ky: number): Partial<Shape> {
+  const sp = (p: Point): Point => ({ x: origin.x + (p.x - origin.x) * kx, y: origin.y + (p.y - origin.y) * ky });
+  switch (s.kind) {
+    case "line":
+    case "rect":
+    case "diamond":
+    case "roundrect":
+    case "cylinder":
+    case "image":
+      return { p1: sp(s.p1), p2: sp(s.p2) } as Partial<Shape>;
+    case "circle":
+      return { center: sp(s.center), r: Math.max(1, s.r * Math.min(Math.abs(kx), Math.abs(ky))) } as Partial<Shape>;
+    case "ellipse":
+      return {
+        center: sp(s.center),
+        rx: Math.max(1, s.rx * Math.abs(kx)),
+        ry: Math.max(1, s.ry * Math.abs(ky)),
+      } as Partial<Shape>;
+    case "node":
+      return { at: sp(s.at) } as Partial<Shape>;
+    case "polygon":
+      return { points: s.points.map(sp) } as Partial<Shape>;
+    case "connector":
+      // Free ends move; anchored ends recompute from their shape anyway.
+      return {
+        from: { ...s.from, point: sp(s.from.point) },
+        to: { ...s.to, point: sp(s.to.point) },
+        waypoints: (s.waypoints ?? []).map(sp),
+      } as Partial<Shape>;
+  }
+}
+
 /** The port of `s` closest to a world point. */
 export function nearestPort(s: Shape, p: Point): PortPoint {
   const ports = portsOf(s);

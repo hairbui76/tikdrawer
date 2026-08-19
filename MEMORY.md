@@ -6,6 +6,43 @@ A running log of decisions, changes, and gotchas for the **TikDrawer** project.
 
 ---
 
+## 2026-08-19 — Scaling for polygons & groups, axis-locked moves, align
+
+Three user asks in one session: "cannot scale element" (traced images are
+polygons — excluded from bbox resize; multi-selections had NO handles at
+all), "Shift+Alt = free move locked to horizontal/vertical", and "align
+option for 1+ elements".
+
+- **Polygon resize:** geometry's `sizeOf`/`setBox` already handled polygons —
+  only `resizeSel` in CanvasStage excluded them. Removed the exclusion;
+  vertex handles still render but *underneath* the bbox handles (blocks
+  swapped) so corners stay grabbable.
+- **Group scale:** selecting ≥2 shapes now shows a dashed bounds box with 8
+  handles. New `groupscale` drag scales every selected shape about the
+  corner opposite the handle (same corner0+raw-travel scheme as single
+  resize, snap/Alt via `snapWith`, `lockAspect` forces uniform on corner
+  handles). New `scaleShape(s, origin, kx, ky)` in geometry — exact for
+  point-based shapes; rotated boxes scale centre+dims (approximation);
+  labels deliberately keep their font size.
+- **Axis-locked moves:** Shift during a shape drag zeroes the smaller raw
+  delta (dominant axis wins) BEFORE grid quantisation — works alone
+  (grid steps along a line) and with Alt (free 1px along a line).
+  Gotcha: Shift+click toggles selection, so plain Shift must be pressed
+  *after* the drag starts; Shift+Alt+click starts the drag directly
+  (onShapeDown now only toggles on `shiftKey && !altKey`).
+- **Align:** `alignSelected(mode)` store action (left/hcenter/right/top/
+  vcenter/bottom). ≥2 shapes align to the selection's combined bounds; a
+  single shape aligns to the canvas. Connectors are skipped (they follow
+  anchors). Six icon buttons in PropertiesPanel — both the multi-select
+  branch and both single-shape branches. `bbox` moved from CanvasStage to
+  geometry as **`shapeBBox`** (CanvasStage imports it aliased) so the store
+  can compute bounds.
+- Verified headless Chrome, production build: polygon shows 8 handles and
+  +45/+40px drag grows its bbox exactly; group SE drag scales both rects
+  exactly 1.5× about the NW corner; Shift drag (40,9)px moves (1.00, 0)cm;
+  Shift+Alt drag (3,27)px moves (0, −0.675)cm; multi align-left/centre-v
+  equalise edges/centres exactly; single-shape centre lands at (10, 7.5)cm.
+
 ## 2026-08-19 — Output option: full page vs one column (2-col paper)
 
 User: TikZ output assumed a full-page figure; wanted an option for one

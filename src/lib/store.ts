@@ -1,7 +1,7 @@
 import { create } from "zustand";
-import { clampZoom, type Unit } from "./coords";
+import { CANVAS_H, CANVAS_W, clampZoom, type Unit } from "./coords";
 import type { TexLayout } from "./generateTikz";
-import { translateShape } from "./geometry";
+import { shapeBBox, translateShape } from "./geometry";
 import { imageShapeFor } from "./images";
 import { type ImageAsset, type Point, type Shape, type Style, type TikzDoc, type Tool } from "./types";
 
@@ -11,6 +11,8 @@ export type Project = {
   doc: TikzDoc;
   updatedAt: number;
 };
+
+export type AlignMode = "left" | "hcenter" | "right" | "top" | "vcenter" | "bottom";
 
 /** A user-saved reusable drawing. */
 export type UserTemplate = { id: string; name: string; shapes: Shape[] };
@@ -84,6 +86,9 @@ type State = {
   deleteSelected: () => void;
   /** Move every selected shape by (dx, dy) canvas px — arrow-key nudging. */
   nudgeSelected: (dx: number, dy: number) => void;
+  /** Align the selection: several shapes align to their combined bounds, a
+   *  single shape aligns to the canvas. Connectors follow their anchors. */
+  alignSelected: (mode: AlignMode) => void;
   /** Save the current selection as a reusable symbol/template. */
   groupSelectionAsTemplate: (name: string) => void;
   /** Insert shapes into the current drawing (cloned + offset), selecting them. */
@@ -272,6 +277,44 @@ export const useStore = create<State>((set) => ({
           ),
         ),
         selectedIds: [],
+      };
+    }),
+
+  alignSelected: (mode) =>
+    set((st) => {
+      const ids = new Set(st.selectedIds);
+      const all = currentShapes(st);
+      const sel = all.filter((s) => ids.has(s.id) && s.kind !== "connector");
+      if (!sel.length) return {};
+      // Reference box: the selection's combined bounds; a lone shape aligns
+      // against the canvas itself.
+      let x0 = 0, y0 = 0, x1 = CANVAS_W, y1 = CANVAS_H;
+      if (sel.length > 1) {
+        x0 = y0 = Infinity;
+        x1 = y1 = -Infinity;
+        for (const s of sel) {
+          const b = shapeBBox(s);
+          x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y);
+          x1 = Math.max(x1, b.x + b.w); y1 = Math.max(y1, b.y + b.h);
+        }
+      }
+      const patches = new Map<string, Partial<Shape>>();
+      for (const s of sel) {
+        const b = shapeBBox(s);
+        let dx = 0, dy = 0;
+        if (mode === "left") dx = x0 - b.x;
+        else if (mode === "hcenter") dx = (x0 + x1) / 2 - (b.x + b.w / 2);
+        else if (mode === "right") dx = x1 - (b.x + b.w);
+        else if (mode === "top") dy = y0 - b.y;
+        else if (mode === "vcenter") dy = (y0 + y1) / 2 - (b.y + b.h / 2);
+        else dy = y1 - (b.y + b.h);
+        if (dx || dy) patches.set(s.id, translateShape(s, dx, dy));
+      }
+      if (!patches.size) return {};
+      return {
+        past: pushPast(st),
+        future: [],
+        ...setShapes(st, all.map((s) => (patches.has(s.id) ? ({ ...s, ...patches.get(s.id) } as Shape) : s))),
       };
     }),
 
