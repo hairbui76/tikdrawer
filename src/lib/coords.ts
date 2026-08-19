@@ -8,6 +8,16 @@ export const PX_PER_CM = 40;
 /** Grid spacing in logical units (0.5 cm). */
 export const GRID = 20;
 
+/**
+ * Zoom limits. Zoom only scales how the canvas is *rendered* (the SVG element's
+ * CSS size); the drawing model, the viewBox and every coordinate stay in logical
+ * units, so nothing downstream — TikZ output, hit-testing, snapping — is aware
+ * of it.
+ */
+export const MIN_ZOOM = 0.1;
+export const MAX_ZOOM = 8;
+export const clampZoom = (z: number): number => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z));
+
 export const round = (n: number): number => Number(n.toFixed(3));
 
 /** Output unit for generated TikZ coordinates / ruler. */

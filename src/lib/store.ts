@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { type Unit } from "./coords";
+import { clampZoom, type Unit } from "./coords";
 import { imageShapeFor } from "./images";
 import { type ImageAsset, type Point, type Shape, type Style, type TikzDoc, type Tool } from "./types";
 
@@ -51,6 +51,8 @@ type State = {
   unit: Unit;
   /** Keep width:height ratio when resizing via the size inputs. */
   lockAspect: boolean;
+  /** Canvas view scale (1 = 100%). Purely visual — see `clampZoom`. */
+  zoom: number;
   /** Per-project signature of the last state saved to a file (for dirty checks). */
   savedSig: Record<string, string>;
   /** Undo/redo stacks hold snapshots of the *current* project's shapes. */
@@ -66,6 +68,10 @@ type State = {
   setShowRuler: (b: boolean) => void;
   setUnit: (u: Unit) => void;
   setLockAspect: (b: boolean) => void;
+  /** Set the zoom to an absolute factor (clamped). */
+  setZoom: (z: number) => void;
+  /** Multiply the zoom by `factor` (clamped) — used by the +/- buttons. */
+  zoomBy: (factor: number) => void;
   markSaved: (projectId: string, signature: string) => void;
   selectShape: (id: string | null) => void;
   toggleSelect: (id: string) => void;
@@ -141,6 +147,7 @@ export const useStore = create<State>((set) => ({
   showRuler: true,
   unit: "cm",
   lockAspect: false,
+  zoom: 1,
   savedSig: {},
   past: [],
   future: [],
@@ -152,6 +159,8 @@ export const useStore = create<State>((set) => ({
   setShowRuler: (b) => set({ showRuler: b }),
   setUnit: (u) => set({ unit: u }),
   setLockAspect: (b) => set({ lockAspect: b }),
+  setZoom: (z) => set({ zoom: clampZoom(z) }),
+  zoomBy: (factor) => set((st) => ({ zoom: clampZoom(st.zoom * factor) })),
   markSaved: (projectId, signature) =>
     set((st) => ({ savedSig: { ...st.savedSig, [projectId]: signature } })),
   selectShape: (id) => set({ selectedIds: id ? [id] : [] }),

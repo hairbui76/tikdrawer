@@ -24,6 +24,8 @@ export function Editor() {
   const undo = useStore((s) => s.undo);
   const redo = useStore((s) => s.redo);
   const setTool = useStore((s) => s.setTool);
+  const setZoom = useStore((s) => s.setZoom);
+  const zoomBy = useStore((s) => s.zoomBy);
   const deleteSelected = useStore((s) => s.deleteSelected);
   const markSaved = useStore((s) => s.markSaved);
   const templates = useStore((s) => s.templates);
@@ -82,6 +84,16 @@ export function Editor() {
         } else if (key === "y" || (key === "z" && e.shiftKey)) {
           e.preventDefault();
           redo();
+        } else if (key === "=" || key === "+") {
+          // "=" is the unshifted key most keyboards send for Ctrl +.
+          e.preventDefault();
+          zoomBy(1.25);
+        } else if (key === "-" || key === "_") {
+          e.preventDefault();
+          zoomBy(1 / 1.25);
+        } else if (key === "0") {
+          e.preventDefault();
+          setZoom(1);
         }
         return;
       }
@@ -100,7 +112,7 @@ export function Editor() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [undo, redo, setTool, deleteSelected]);
+  }, [undo, redo, setTool, deleteSelected, setZoom, zoomBy]);
 
   // Paste: an image from the clipboard (e.g. a screenshot) → add + place it;
   // otherwise paste the internal shape clipboard (Ctrl+V after Ctrl+C).

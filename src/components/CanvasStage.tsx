@@ -1,7 +1,17 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { CANVAS_H, CANVAS_W, GRID, PX_PER_CM, UNIT_PER_CM, dist, snapToGrid } from "@/lib/coords";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  CANVAS_H,
+  CANVAS_W,
+  GRID,
+  MAX_ZOOM,
+  MIN_ZOOM,
+  PX_PER_CM,
+  UNIT_PER_CM,
+  dist,
+  snapToGrid,
+} from "@/lib/coords";
 import { fileToAsset } from "@/lib/images";
 import { fontPxOf, labelHalfSize } from "@/lib/text";
 import {
@@ -395,6 +405,9 @@ export function CanvasStage() {
   const showRuler = useStore((s) => s.showRuler);
   const unit = useStore((s) => s.unit);
   const lockAspect = useStore((s) => s.lockAspect);
+  const zoom = useStore((s) => s.zoom);
+  const setZoom = useStore((s) => s.setZoom);
+  const zoomBy = useStore((s) => s.zoomBy);
   const selectedIds = useStore((s) => s.selectedIds);
   const addShape = useStore((s) => s.addShape);
   const updateShape = useStore((s) => s.updateShape);
@@ -412,6 +425,10 @@ export function CanvasStage() {
   const imageHrefById = new Map(images.map((im) => [im.id, im.dataUrl]));
 
   const svgRef = useRef<SVGSVGElement>(null);
+  // The scroll viewport and the zoom-sized wrapper the <svg> fills. Panning is
+  // just scrolling this viewport, so it needs no coordinate maths of its own.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
   const startRef = useRef<Point | null>(null);
   const [draft, setDraft] = useState<Shape | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
@@ -432,6 +449,138 @@ export function CanvasStage() {
   const [dragOver, setDragOver] = useState(false);
   // Anchor-tool hover marker: where a bend/vertex would be added.
   const [anchorHover, setAnchorHover] = useState<Point | null>(null);
+  // Space held = temporary pan mode (the drawing tools are suspended).
+  const [spaceDown, setSpaceDown] = useState(false);
+
+  /* ------------------------------ zoom & pan ------------------------------ */
+
+  // Ruler gutter, in viewBox units. Declared here because the zoom helpers
+  // below need the full viewBox size.
+  const M = showRuler ? RULER : 0;
+  const vbW = CANVAS_W + M;
+  const vbH = CANVAS_H + M;
+  /** Padding around the page inside the scroll viewport (CSS px). */
+  const PAD = 16;
+
+  // Handle sizes are authored in viewBox units but must stay a constant size on
+  // screen, so they are divided by the zoom. (Strokes use non-scaling-stroke.)
+  const hz = (n: number): number => n / zoom;
+
+  // A pending "keep this point under the cursor" correction, applied once the
+  // new zoom has been laid out.
+  const zoomAnchorRef = useRef<{ fx: number; fy: number; cx: number; cy: number } | null>(null);
+  const panRef = useRef<{ cx: number; cy: number; left: number; top: number } | null>(null);
+
+  /** Zoom by `factor`, keeping the point under (cx, cy) visually fixed. */
+  function zoomAt(factor: number, cx: number, cy: number) {
+    const wrap = wrapRef.current;
+    if (wrap) {
+      const r = wrap.getBoundingClientRect();
+      zoomAnchorRef.current = { fx: (cx - r.left) / r.width, fy: (cy - r.top) / r.height, cx, cy };
+    }
+    zoomBy(factor);
+  }
+
+  // Re-anchor after the browser has laid the new size out but before paint, so
+  // zooming doesn't visibly jump. scrollLeft/Top clamp themselves when the page
+  // is smaller than the viewport, which is exactly the centred case.
+  useLayoutEffect(() => {
+    const a = zoomAnchorRef.current;
+    const el = scrollRef.current;
+    const wrap = wrapRef.current;
+    zoomAnchorRef.current = null;
+    if (!a || !el || !wrap) return;
+    const box = el.getBoundingClientRect();
+    el.scrollLeft = wrap.offsetLeft + a.fx * wrap.offsetWidth - (a.cx - box.left);
+    el.scrollTop = wrap.offsetTop + a.fy * wrap.offsetHeight - (a.cy - box.top);
+  }, [zoom]);
+
+  // Ctrl/Cmd + wheel zooms; a plain wheel scrolls (pans) natively. This must be
+  // a non-passive native listener: React's synthetic wheel handler is passive,
+  // so preventDefault there would not stop the browser's own page zoom.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      // Exponential so each notch is a constant *ratio*, and trackpads (which
+      // send many small deltas) feel the same as a mouse wheel.
+      zoomAt(Math.exp(-e.deltaY * 0.0015), e.clientX, e.clientY);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [zoomBy]);
+
+  /** Scale at which the whole page fits the viewport. */
+  function fitZoom(): number {
+    const el = scrollRef.current;
+    if (!el) return 1;
+    return Math.min((el.clientWidth - 2 * PAD) / vbW, (el.clientHeight - 2 * PAD) / vbH);
+  }
+
+  // Ctrl/Cmd+9 = fit. Lives here rather than with the other shortcuts because
+  // only this component knows the viewport size.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "9" || !(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault();
+      setZoom(fitZoom());
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [setZoom, vbW, vbH]);
+
+  // Space toggles pan mode. Ignored while typing so it still types a space.
+  useEffect(() => {
+    const typing = (t: EventTarget | null): boolean => {
+      const el = t as HTMLElement | null;
+      const tag = el?.tagName;
+      return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || !!el?.isContentEditable;
+    };
+    const down = (e: KeyboardEvent) => {
+      if (e.code !== "Space" || typing(e.target)) return;
+      e.preventDefault(); // otherwise space scrolls the viewport
+      setSpaceDown(true);
+    };
+    const up = (e: KeyboardEvent) => {
+      if (e.code === "Space") setSpaceDown(false);
+    };
+    // Releasing space outside the window would otherwise latch pan mode on.
+    const blur = () => setSpaceDown(false);
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    window.addEventListener("blur", blur);
+    return () => {
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+      window.removeEventListener("blur", blur);
+    };
+  }, []);
+
+  /** Start a pan drag (middle button, or any button with space held). */
+  function startPan(e: React.PointerEvent) {
+    const el = scrollRef.current;
+    if (!el) return;
+    panRef.current = { cx: e.clientX, cy: e.clientY, left: el.scrollLeft, top: el.scrollTop };
+    const move = (ev: PointerEvent) => {
+      const p = panRef.current;
+      if (!p || !scrollRef.current) return;
+      scrollRef.current.scrollLeft = p.left - (ev.clientX - p.cx);
+      scrollRef.current.scrollTop = p.top - (ev.clientY - p.cy);
+    };
+    const end = () => {
+      panRef.current = null;
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+  }
 
   // Snap a point so it lines up (same x or y) with nearby neighbour points —
   // makes orthogonal/zig-zag bends align with the shape's connection ports.
@@ -569,7 +718,7 @@ export function CanvasStage() {
   function connectTarget(p: Point, excludeId?: string): Shape | undefined {
     const inside = shapeAtPoint(shapes, p, excludeId);
     if (inside) return inside;
-    const MARGIN = 16;
+    const MARGIN = hz(16);
     let best: Shape | undefined;
     let bestD = MARGIN;
     for (const s of shapes) {
@@ -651,12 +800,12 @@ export function CanvasStage() {
         return;
       }
       // Click near the first vertex closes the polygon.
-      if (poly.length >= 3 && dist(p, poly[0]) < 10) {
+      if (poly.length >= 3 && dist(p, poly[0]) < hz(10)) {
         commitPoly(poly);
         return;
       }
       // Ignore a click that lands on the previous vertex (e.g. double-click).
-      if (dist(p, poly[poly.length - 1]) < 6) return;
+      if (dist(p, poly[poly.length - 1]) < hz(6)) return;
       setPoly([...poly, p]);
       return;
     }
@@ -735,10 +884,10 @@ export function CanvasStage() {
     updateShape(conn.id, { waypoints: (conn.waypoints ?? []).filter((_, i) => i !== index) });
   }
 
-  // Closest connector to a world point (within 10px), with segment + point.
+  // Closest connector to a world point (within 10 screen px), with segment + point.
   function connectorHitTest(p: Point): { conn: ConnectorShape; seg: number; point: Point } | null {
     let best: { conn: ConnectorShape; seg: number; point: Point } | null = null;
-    let bestD = 10;
+    let bestD = hz(10);
     for (const s of shapes) {
       if (s.kind !== "connector") continue;
       const near = nearestOnPolyline(connectorPoints(s, byId), p);
@@ -755,10 +904,10 @@ export function CanvasStage() {
     return poly.closed && poly.points.length ? [...poly.points, poly.points[0]] : poly.points;
   }
 
-  // Closest polygon edge to a world point (within 10px), with edge index + world point.
+  // Closest polygon edge to a world point (within 10 screen px), with edge index + world point.
   function polygonHitTest(p: Point): { poly: PolygonShape; seg: number; point: Point } | null {
     let best: { poly: PolygonShape; seg: number; point: Point } | null = null;
-    let bestD = 10;
+    let bestD = hz(10);
     for (const s of shapes) {
       if (s.kind !== "polygon" || s.points.length < 2) continue;
       const center = shapeCenter(s);
@@ -869,6 +1018,7 @@ export function CanvasStage() {
   }
 
   function onMove(e: React.PointerEvent) {
+    if (panRef.current) return; // panning: no hover tracking or drafting
     if (poly) {
       setCursor(getPoint(e));
       return;
@@ -1042,7 +1192,6 @@ export function CanvasStage() {
   }
 
   // Coordinate ruler (cm) along the top (x) and left (y, TikZ-up) edges.
-  const M = showRuler ? RULER : 0;
   const ruler: React.ReactNode[] = [];
   if (showRuler) {
     const label = (cm: number) => `${Math.round(cm * UNIT_PER_CM[unit])}`;
@@ -1084,326 +1233,412 @@ export function CanvasStage() {
     selected && tool === "select" && selected.kind === "polygon" && !draft ? selected : null;
 
   return (
-    <div
-      className={`flex h-full w-full select-none items-center justify-center p-4 ${dragOver ? "bg-blue-100" : "bg-slate-100"}`}
-      onDragOver={(e) => {
-        e.preventDefault();
-        e.dataTransfer.dropEffect = "copy";
-        if (!dragOver) setDragOver(true);
-      }}
-      onDragLeave={(e) => {
-        if (e.currentTarget === e.target) setDragOver(false);
-      }}
-      onDrop={onDrop}
-    >
-      <svg
-        ref={svgRef}
-        viewBox={`${-M} ${-M} ${CANVAS_W + M} ${CANVAS_H + M}`}
-        className="h-full max-h-full w-full max-w-full select-none rounded border border-slate-300 shadow-sm"
-        style={{ aspectRatio: `${CANVAS_W + M} / ${CANVAS_H + M}`, cursor: tool === "select" ? "default" : "crosshair", touchAction: "none", WebkitUserSelect: "none", userSelect: "none" }}
-        onPointerDown={onBackgroundDown}
-        onPointerMove={onMove}
-        onPointerUp={onUp}
-        onPointerLeave={onUp}
-        onDoubleClick={(e) => {
-          if (poly) {
-            commitPoly(poly);
-            return;
-          }
-          // Pointer capture (from the click that selects) redirects dblclick to
-          // the <svg>, so resolve the target by hit-testing here.
-          if (tool !== "select") return;
-          const target = shapeAtPoint(shapes, clientToCanvas(e.clientX, e.clientY));
-          if (target && TEXTABLE.has(target.kind)) startEdit(target);
+    <div className="relative h-full w-full">
+      <div
+        ref={scrollRef}
+        className={`flex h-full w-full select-none overflow-auto ${dragOver ? "bg-blue-100" : "bg-slate-100"}`}
+        style={{ padding: PAD }}
+        // Capture phase, so a pan takes precedence over the drawing/selection
+        // handlers on the <svg> and on individual shapes.
+        onPointerDownCapture={(e) => {
+          if (e.button !== 1 && !spaceDown) return;
+          e.stopPropagation();
+          startPan(e);
         }}
+        // Blocks the middle-click autoscroll widget (preventing the pointer event
+        // is not enough for it).
+        onMouseDown={(e) => {
+          if (e.button === 1) e.preventDefault();
+        }}
+        onDragOver={(e) => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "copy";
+          if (!dragOver) setDragOver(true);
+        }}
+        onDragLeave={(e) => {
+          if (e.currentTarget === e.target) setDragOver(false);
+        }}
+        onDrop={onDrop}
       >
-        <rect x={-M} y={-M} width={CANVAS_W + M} height={CANVAS_H + M} fill="#f8fafc" />
-        <rect x={0} y={0} width={CANVAS_W} height={CANVAS_H} fill="#ffffff" />
+        {/* Auto margins centre the page while it is smaller than the viewport,
+            and collapse to 0 once it overflows — unlike justify/align centring,
+            which would put the overflow out of scroll reach. */}
+        <div ref={wrapRef} className="m-auto shrink-0" style={{ width: vbW * zoom, height: vbH * zoom }}>
+          <svg
+            ref={svgRef}
+            viewBox={`${-M} ${-M} ${vbW} ${vbH}`}
+            className="block h-full w-full select-none rounded border border-slate-300 shadow-sm"
+            style={{ cursor: spaceDown ? (panRef.current ? "grabbing" : "grab") : tool === "select" ? "default" : "crosshair", touchAction: "none", WebkitUserSelect: "none", userSelect: "none" }}
+            onPointerDown={onBackgroundDown}
+            onPointerMove={onMove}
+            onPointerUp={onUp}
+            onPointerLeave={onUp}
+            onDoubleClick={(e) => {
+              if (poly) {
+                commitPoly(poly);
+                return;
+              }
+              // Pointer capture (from the click that selects) redirects dblclick to
+              // the <svg>, so resolve the target by hit-testing here.
+              if (tool !== "select") return;
+              const target = shapeAtPoint(shapes, clientToCanvas(e.clientX, e.clientY));
+              if (target && TEXTABLE.has(target.kind)) startEdit(target);
+            }}
+          >
+            <rect x={-M} y={-M} width={CANVAS_W + M} height={CANVAS_H + M} fill="#f8fafc" />
+            <rect x={0} y={0} width={CANVAS_W} height={CANVAS_H} fill="#ffffff" />
 
-        <defs>
-          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke" />
-          </marker>
-          <marker id="arrowStart" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path d="M 10 0 L 0 5 L 10 10 z" fill="context-stroke" />
-          </marker>
-        </defs>
+            <defs>
+              <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke" />
+              </marker>
+              <marker id="arrowStart" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 10 0 L 0 5 L 10 10 z" fill="context-stroke" />
+              </marker>
+            </defs>
 
-        <g>{gridLines}</g>
-        {showRuler && <g pointerEvents="none">{ruler}</g>}
+            <g>{gridLines}</g>
+            {showRuler && <g pointerEvents="none">{ruler}</g>}
 
-        {shapes.map((s) => {
-          const rot = rotationOf(s);
-          let transform: string | undefined;
-          if (rot) {
-            const c = shapeCenter(s);
-            transform = `rotate(${rot} ${c.x} ${c.y})`;
-          }
-          return (
-            <g
-              key={s.id}
-              transform={transform}
-              onPointerDown={(e) => onShapeDown(e, s)}
-              style={{ pointerEvents: tool === "select" ? "auto" : "none", cursor: tool === "select" ? "move" : "inherit" }}
-            >
-              {s.kind === "connector" ? (
-                <ConnectorView connector={s} byId={byId} selectMode={tool === "select"} />
-              ) : (
-                <ShapeView
-                  shape={s}
-                  selected={selectedIds.includes(s.id)}
-                  hovered={tool === "connector" && hoverId === s.id}
-                  imageHref={s.kind === "image" ? imageHrefById.get(s.imageId) : undefined}
-                />
-              )}
-            </g>
-          );
-        })}
-
-        {editing &&
-          (() => {
-            const shape = shapes.find((s) => s.id === editing.id);
-            if (!shape || !TEXTABLE.has(shape.kind)) return null;
-            const c = shapeCenter(shape);
-            const w = 160;
-            const h = 30;
-            return (
-              <foreignObject
-                x={c.x - w / 2}
-                y={c.y - h / 2}
-                width={w}
-                height={h}
-                onPointerDown={(e) => e.stopPropagation()}
-              >
-                <input
-                  ref={inputRef}
-                  value={shapeText(shape) ?? ""}
-                  onChange={(e) => updateShape(shape.id, { text: e.target.value })}
-                  onBlur={commitEdit}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      commitEdit();
-                    } else if (e.key === "Escape") {
-                      e.preventDefault();
-                      updateShape(shape.id, { text: editing.original });
-                      setEditing(null);
-                    }
-                  }}
-                  style={{
-                    width: "100%",
-                    height: "100%",
-                    textAlign: "center",
-                    border: "1.5px solid #0ea5e9",
-                    borderRadius: 4,
-                    font: "16px sans-serif",
-                    outline: "none",
-                    background: "white",
-                    boxSizing: "border-box",
-                    userSelect: "text",
-                    WebkitUserSelect: "text",
-                  }}
-                />
-              </foreignObject>
-            );
-          })()}
-
-        {draft &&
-          (draft.kind === "connector" ? (
-            <ConnectorView connector={draft} byId={byId} selectMode={false} />
-          ) : (
-            <ShapeView shape={draft} selected={false} />
-          ))}
-
-        {marquee && (marquee.w > 0 || marquee.h > 0) && (
-          <rect
-            x={marquee.x}
-            y={marquee.y}
-            width={marquee.w}
-            height={marquee.h}
-            fill="rgba(14,165,233,0.10)"
-            stroke="#0ea5e9"
-            strokeWidth={1}
-            strokeDasharray="4 3"
-            vectorEffect="non-scaling-stroke"
-            pointerEvents="none"
-          />
-        )}
-
-        {poly && (
-          <g pointerEvents="none">
-            <polyline
-              points={[...poly, ...(cursor ? [cursor] : [])].map((p) => `${p.x},${p.y}`).join(" ")}
-              fill="none"
-              stroke="#0ea5e9"
-              strokeWidth={1.5}
-              strokeDasharray="4 3"
-              vectorEffect="non-scaling-stroke"
-            />
-            {poly.map((p, i) => (
-              <circle
-                key={i}
-                cx={p.x}
-                cy={p.y}
-                r={i === 0 ? 5 : 3}
-                fill={i === 0 ? "#0ea5e9" : "#fff"}
-                stroke="#0ea5e9"
-                strokeWidth={1.2}
-              />
-            ))}
-          </g>
-        )}
-
-        {selectedConnector &&
-          (() => {
-            const pts = connectorPoints(selectedConnector, byId);
-            const wp = selectedConnector.waypoints ?? [];
-            const a = pts[0];
-            const b = pts[pts.length - 1];
-            return (
-              <g>
-                {/* bend points: white squares — drag to move this point freely,
-                    double-click to remove. (Distinct from the blue segment dots.) */}
-                {wp.map((w, i) => (
-                  <rect
-                    key={`wp${i}`}
-                    x={w.x - 5}
-                    y={w.y - 5}
-                    width={10}
-                    height={10}
-                    rx={1.5}
-                    fill="#fff"
-                    stroke="#0ea5e9"
-                    strokeWidth={1.75}
-                    style={{ cursor: "move" }}
-                    onPointerDown={(e) => onHandleDown(e, { type: "waypoint", id: selectedConnector.id, index: i, start: getPoint(e) })}
-                    onDoubleClick={(e) => {
-                      e.stopPropagation();
-                      removeWaypoint(selectedConnector, i);
-                    }}
-                  />
-                ))}
-                {/* endpoints */}
-                <circle cx={a.x} cy={a.y} r={5} fill="#fff" stroke="#0ea5e9" strokeWidth={1.5} style={{ cursor: "move" }} onPointerDown={(e) => onHandleDown(e, { type: "endpoint", id: selectedConnector.id, end: "from", start: getPoint(e) })} />
-                <circle cx={b.x} cy={b.y} r={5} fill="#fff" stroke="#0ea5e9" strokeWidth={1.5} style={{ cursor: "move" }} onPointerDown={(e) => onHandleDown(e, { type: "endpoint", id: selectedConnector.id, end: "to", start: getPoint(e) })} />
-              </g>
-            );
-          })()}
-
-        {portShape && (
-          <g>
-            {portsOf(portShape).map((port, i) => (
-              <circle
-                key={i}
-                cx={port.point.x}
-                cy={port.point.y}
-                r={3.5}
-                fill="#fff"
-                stroke="#0ea5e9"
-                strokeWidth={1.25}
-                style={{ cursor: "crosshair" }}
-                onPointerDown={(e) => onPortDown(e, portShape, port)}
-              />
-            ))}
-          </g>
-        )}
-
-        {rotShape &&
-          (() => {
-            const c = shapeCenter(rotShape);
-            const rot = rotationOf(rotShape);
-            const b = bbox(rotShape);
-            const topMid = rotatePoint({ x: c.x, y: b.y }, c, rot);
-            const handle = rotatePoint({ x: c.x, y: b.y - 22 }, c, rot);
-            return (
-              <g>
-                <line x1={topMid.x} y1={topMid.y} x2={handle.x} y2={handle.y} stroke="#0ea5e9" strokeWidth={0.75} vectorEffect="non-scaling-stroke" pointerEvents="none" />
-                <circle
-                  cx={handle.x}
-                  cy={handle.y}
-                  r={5}
-                  fill="#0ea5e9"
-                  stroke="#fff"
-                  strokeWidth={1.5}
-                  style={{ cursor: "grab" }}
-                  onPointerDown={(e) => onHandleDown(e, { type: "rotate", id: rotShape.id, start: getPoint(e), center: c })}
-                />
-              </g>
-            );
-          })()}
-
-        {resizeSel &&
-          (() => {
-            const size = sizeOf(resizeSel)!;
-            const c = shapeCenter(resizeSel);
-            const rot = rotationOf(resizeSel);
-            const hw = size.w / 2;
-            const hh = size.h / 2;
-            return (
-              <g>
-                {RESIZE_HANDLES.map(([hx, hy]) => {
-                  const wp = rotatePoint({ x: c.x + hx * hw, y: c.y + hy * hh }, c, rot);
-                  const cursor = hx && hy ? (hx === hy ? "nwse-resize" : "nesw-resize") : hx ? "ew-resize" : "ns-resize";
-                  return (
-                    <rect
-                      key={`${hx}_${hy}`}
-                      x={wp.x - 4}
-                      y={wp.y - 4}
-                      width={8}
-                      height={8}
-                      fill="#fff"
-                      stroke="#0ea5e9"
-                      strokeWidth={1.25}
-                      vectorEffect="non-scaling-stroke"
-                      style={{ cursor }}
-                      onPointerDown={(e) => onResizeDown(e, resizeSel, hx, hy)}
+            {shapes.map((s) => {
+              const rot = rotationOf(s);
+              let transform: string | undefined;
+              if (rot) {
+                const c = shapeCenter(s);
+                transform = `rotate(${rot} ${c.x} ${c.y})`;
+              }
+              return (
+                <g
+                  key={s.id}
+                  transform={transform}
+                  onPointerDown={(e) => onShapeDown(e, s)}
+                  style={{ pointerEvents: tool === "select" ? "auto" : "none", cursor: tool === "select" ? "move" : "inherit" }}
+                >
+                  {s.kind === "connector" ? (
+                    <ConnectorView connector={s} byId={byId} selectMode={tool === "select"} />
+                  ) : (
+                    <ShapeView
+                      shape={s}
+                      selected={selectedIds.includes(s.id)}
+                      hovered={tool === "connector" && hoverId === s.id}
+                      imageHref={s.kind === "image" ? imageHrefById.get(s.imageId) : undefined}
                     />
-                  );
-                })}
-              </g>
-            );
-          })()}
+                  )}
+                </g>
+              );
+            })}
 
-        {polyVertexShape &&
-          (() => {
-            const c = shapeCenter(polyVertexShape);
-            const rot = rotationOf(polyVertexShape);
-            return (
-              <g>
-                {polyVertexShape.points.map((pt, i) => {
-                  const w = rotatePoint(pt, c, rot);
-                  return (
-                    <rect
-                      key={`pv${i}`}
-                      x={w.x - 5}
-                      y={w.y - 5}
-                      width={10}
-                      height={10}
-                      rx={1.5}
-                      fill="#fff"
-                      stroke="#0ea5e9"
-                      strokeWidth={1.75}
-                      style={{ cursor: "move" }}
-                      onPointerDown={(e) => onHandleDown(e, { type: "vertex", id: polyVertexShape.id, index: i, start: getPoint(e) })}
-                      onDoubleClick={(e) => {
-                        e.stopPropagation();
-                        removePolygonVertex(polyVertexShape, i);
+            {editing &&
+              (() => {
+                const shape = shapes.find((s) => s.id === editing.id);
+                if (!shape || !TEXTABLE.has(shape.kind)) return null;
+                const c = shapeCenter(shape);
+                const w = 160;
+                const h = 30;
+                return (
+                  <foreignObject
+                    x={c.x - w / 2}
+                    y={c.y - h / 2}
+                    width={w}
+                    height={h}
+                    onPointerDown={(e) => e.stopPropagation()}
+                  >
+                    <input
+                      ref={inputRef}
+                      value={shapeText(shape) ?? ""}
+                      onChange={(e) => updateShape(shape.id, { text: e.target.value })}
+                      onBlur={commitEdit}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          commitEdit();
+                        } else if (e.key === "Escape") {
+                          e.preventDefault();
+                          updateShape(shape.id, { text: editing.original });
+                          setEditing(null);
+                        }
+                      }}
+                      style={{
+                        width: "100%",
+                        height: "100%",
+                        textAlign: "center",
+                        border: "1.5px solid #0ea5e9",
+                        borderRadius: 4,
+                        font: "16px sans-serif",
+                        outline: "none",
+                        background: "white",
+                        boxSizing: "border-box",
+                        userSelect: "text",
+                        WebkitUserSelect: "text",
                       }}
                     />
-                  );
-                })}
-              </g>
-            );
-          })()}
+                  </foreignObject>
+                );
+              })()}
 
-        {tool === "anchor" && anchorHover && (
-          <g pointerEvents="none">
-            <circle cx={anchorHover.x} cy={anchorHover.y} r={7} fill="#fff" stroke="#0ea5e9" strokeWidth={1.5} />
-            <line x1={anchorHover.x - 3.5} y1={anchorHover.y} x2={anchorHover.x + 3.5} y2={anchorHover.y} stroke="#0ea5e9" strokeWidth={1.5} />
-            <line x1={anchorHover.x} y1={anchorHover.y - 3.5} x2={anchorHover.x} y2={anchorHover.y + 3.5} stroke="#0ea5e9" strokeWidth={1.5} />
-          </g>
-        )}
-      </svg>
+            {draft &&
+              (draft.kind === "connector" ? (
+                <ConnectorView connector={draft} byId={byId} selectMode={false} />
+              ) : (
+                <ShapeView shape={draft} selected={false} />
+              ))}
+
+            {marquee && (marquee.w > 0 || marquee.h > 0) && (
+              <rect
+                x={marquee.x}
+                y={marquee.y}
+                width={marquee.w}
+                height={marquee.h}
+                fill="rgba(14,165,233,0.10)"
+                stroke="#0ea5e9"
+                strokeWidth={1}
+                strokeDasharray="4 3"
+                vectorEffect="non-scaling-stroke"
+                pointerEvents="none"
+              />
+            )}
+
+            {poly && (
+              <g pointerEvents="none">
+                <polyline
+                  points={[...poly, ...(cursor ? [cursor] : [])].map((p) => `${p.x},${p.y}`).join(" ")}
+                  fill="none"
+                  stroke="#0ea5e9"
+                  strokeWidth={1.5}
+                  strokeDasharray="4 3"
+                  vectorEffect="non-scaling-stroke"
+                />
+                {poly.map((p, i) => (
+                  <circle
+                    key={i}
+                    cx={p.x}
+                    cy={p.y}
+                    r={hz(i === 0 ? 5 : 3)}
+                    fill={i === 0 ? "#0ea5e9" : "#fff"}
+                    stroke="#0ea5e9"
+                    strokeWidth={1.2}
+                    vectorEffect="non-scaling-stroke"
+                  />
+                ))}
+              </g>
+            )}
+
+            {selectedConnector &&
+              (() => {
+                const pts = connectorPoints(selectedConnector, byId);
+                const wp = selectedConnector.waypoints ?? [];
+                const a = pts[0];
+                const b = pts[pts.length - 1];
+                return (
+                  <g>
+                    {/* bend points: white squares — drag to move this point freely,
+                        double-click to remove. (Distinct from the blue segment dots.) */}
+                    {wp.map((w, i) => (
+                      <rect
+                        key={`wp${i}`}
+                        x={w.x - hz(5)}
+                        y={w.y - hz(5)}
+                        width={hz(10)}
+                        height={hz(10)}
+                        rx={hz(1.5)}
+                        fill="#fff"
+                        stroke="#0ea5e9"
+                        strokeWidth={1.75}
+                        vectorEffect="non-scaling-stroke"
+                        style={{ cursor: "move" }}
+                        onPointerDown={(e) => onHandleDown(e, { type: "waypoint", id: selectedConnector.id, index: i, start: getPoint(e) })}
+                        onDoubleClick={(e) => {
+                          e.stopPropagation();
+                          removeWaypoint(selectedConnector, i);
+                        }}
+                      />
+                    ))}
+                    {/* endpoints */}
+                    <circle cx={a.x} cy={a.y} r={hz(5)} fill="#fff" stroke="#0ea5e9" strokeWidth={1.5} vectorEffect="non-scaling-stroke" style={{ cursor: "move" }} onPointerDown={(e) => onHandleDown(e, { type: "endpoint", id: selectedConnector.id, end: "from", start: getPoint(e) })} />
+                    <circle cx={b.x} cy={b.y} r={hz(5)} fill="#fff" stroke="#0ea5e9" strokeWidth={1.5} vectorEffect="non-scaling-stroke" style={{ cursor: "move" }} onPointerDown={(e) => onHandleDown(e, { type: "endpoint", id: selectedConnector.id, end: "to", start: getPoint(e) })} />
+                  </g>
+                );
+              })()}
+
+            {portShape && (
+              <g>
+                {portsOf(portShape).map((port, i) => (
+                  <circle
+                    key={i}
+                    cx={port.point.x}
+                    cy={port.point.y}
+                    r={hz(3.5)}
+                    fill="#fff"
+                    stroke="#0ea5e9"
+                    strokeWidth={1.25}
+                    vectorEffect="non-scaling-stroke"
+                    style={{ cursor: "crosshair" }}
+                    onPointerDown={(e) => onPortDown(e, portShape, port)}
+                  />
+                ))}
+              </g>
+            )}
+
+            {rotShape &&
+              (() => {
+                const c = shapeCenter(rotShape);
+                const rot = rotationOf(rotShape);
+                const b = bbox(rotShape);
+                const topMid = rotatePoint({ x: c.x, y: b.y }, c, rot);
+                const handle = rotatePoint({ x: c.x, y: b.y - hz(22) }, c, rot);
+                return (
+                  <g>
+                    <line x1={topMid.x} y1={topMid.y} x2={handle.x} y2={handle.y} stroke="#0ea5e9" strokeWidth={0.75} vectorEffect="non-scaling-stroke" pointerEvents="none" />
+                    <circle
+                      cx={handle.x}
+                      cy={handle.y}
+                      r={hz(5)}
+                      fill="#0ea5e9"
+                      stroke="#fff"
+                      strokeWidth={1.5}
+                      vectorEffect="non-scaling-stroke"
+                      style={{ cursor: "grab" }}
+                      onPointerDown={(e) => onHandleDown(e, { type: "rotate", id: rotShape.id, start: getPoint(e), center: c })}
+                    />
+                  </g>
+                );
+              })()}
+
+            {resizeSel &&
+              (() => {
+                const size = sizeOf(resizeSel)!;
+                const c = shapeCenter(resizeSel);
+                const rot = rotationOf(resizeSel);
+                const hw = size.w / 2;
+                const hh = size.h / 2;
+                return (
+                  <g>
+                    {RESIZE_HANDLES.map(([hx, hy]) => {
+                      const wp = rotatePoint({ x: c.x + hx * hw, y: c.y + hy * hh }, c, rot);
+                      const cursor = hx && hy ? (hx === hy ? "nwse-resize" : "nesw-resize") : hx ? "ew-resize" : "ns-resize";
+                      return (
+                        <rect
+                          key={`${hx}_${hy}`}
+                          x={wp.x - hz(4)}
+                          y={wp.y - hz(4)}
+                          width={hz(8)}
+                          height={hz(8)}
+                          fill="#fff"
+                          stroke="#0ea5e9"
+                          strokeWidth={1.25}
+                          vectorEffect="non-scaling-stroke"
+                          style={{ cursor }}
+                          onPointerDown={(e) => onResizeDown(e, resizeSel, hx, hy)}
+                        />
+                      );
+                    })}
+                  </g>
+                );
+              })()}
+
+            {polyVertexShape &&
+              (() => {
+                const c = shapeCenter(polyVertexShape);
+                const rot = rotationOf(polyVertexShape);
+                return (
+                  <g>
+                    {polyVertexShape.points.map((pt, i) => {
+                      const w = rotatePoint(pt, c, rot);
+                      return (
+                        <rect
+                          key={`pv${i}`}
+                          x={w.x - hz(5)}
+                          y={w.y - hz(5)}
+                          width={hz(10)}
+                          height={hz(10)}
+                          rx={hz(1.5)}
+                          fill="#fff"
+                          stroke="#0ea5e9"
+                          strokeWidth={1.75}
+                          vectorEffect="non-scaling-stroke"
+                          style={{ cursor: "move" }}
+                          onPointerDown={(e) => onHandleDown(e, { type: "vertex", id: polyVertexShape.id, index: i, start: getPoint(e) })}
+                          onDoubleClick={(e) => {
+                            e.stopPropagation();
+                            removePolygonVertex(polyVertexShape, i);
+                          }}
+                        />
+                      );
+                    })}
+                  </g>
+                );
+              })()}
+
+            {tool === "anchor" && anchorHover && (
+              <g pointerEvents="none">
+                <circle cx={anchorHover.x} cy={anchorHover.y} r={hz(7)} fill="#fff" stroke="#0ea5e9" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+                <line x1={anchorHover.x - hz(3.5)} y1={anchorHover.y} x2={anchorHover.x + hz(3.5)} y2={anchorHover.y} stroke="#0ea5e9" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+                <line x1={anchorHover.x} y1={anchorHover.y - hz(3.5)} x2={anchorHover.x} y2={anchorHover.y + hz(3.5)} stroke="#0ea5e9" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+              </g>
+            )}
+          </svg>
+        </div>
+      </div>
+
+      <ZoomBar
+        zoom={zoom}
+        onZoom={(factor) => {
+          // Button/keyboard zoom anchors on the viewport centre, which is what
+          // the eye is on — unlike the wheel, which anchors on the cursor.
+          const el = scrollRef.current;
+          if (!el) return zoomBy(factor);
+          const b = el.getBoundingClientRect();
+          zoomAt(factor, b.left + b.width / 2, b.top + b.height / 2);
+        }}
+        onFit={() => setZoom(fitZoom())}
+        onReset={() => setZoom(1)}
+      />
+    </div>
+  );
+}
+
+/** Floating zoom control (bottom-right of the canvas area). */
+function ZoomBar({
+  zoom,
+  onZoom,
+  onFit,
+  onReset,
+}: {
+  zoom: number;
+  onZoom: (factor: number) => void;
+  onFit: () => void;
+  onReset: () => void;
+}) {
+  const btn =
+    "flex h-7 w-7 items-center justify-center rounded text-slate-600 transition hover:bg-slate-100 disabled:opacity-30 disabled:hover:bg-transparent";
+  return (
+    <div className="absolute bottom-3 right-3 flex items-center gap-0.5 rounded-md border border-slate-300 bg-white/95 p-1 shadow-sm backdrop-blur">
+      <button className={btn} onClick={() => onZoom(1 / 1.25)} disabled={zoom <= MIN_ZOOM} title="Zoom out (Ctrl -)" aria-label="Zoom out">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+          <line x1="5" y1="12" x2="19" y2="12" />
+        </svg>
+      </button>
+      <button
+        className="min-w-[3.25rem] rounded px-1 py-1 text-xs font-medium tabular-nums text-slate-700 transition hover:bg-slate-100"
+        onClick={onReset}
+        title="Reset to 100% (Ctrl 0)"
+      >
+        {Math.round(zoom * 100)}%
+      </button>
+      <button className={btn} onClick={() => onZoom(1.25)} disabled={zoom >= MAX_ZOOM} title="Zoom in (Ctrl +)" aria-label="Zoom in">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+          <line x1="12" y1="5" x2="12" y2="19" />
+          <line x1="5" y1="12" x2="19" y2="12" />
+        </svg>
+      </button>
+      <div className="mx-0.5 h-4 w-px bg-slate-200" />
+      <button
+        className="rounded px-2 py-1 text-xs font-medium text-slate-700 transition hover:bg-slate-100"
+        onClick={onFit}
+        title="Fit the page in the window (Ctrl 9)"
+      >
+        Fit
+      </button>
     </div>
   );
 }

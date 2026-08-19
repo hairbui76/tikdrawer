@@ -6,6 +6,57 @@ A running log of decisions, changes, and gotchas for the **TikDrawer** project.
 
 ---
 
+## 2026-08-19 — Canvas zoom & pan
+
+Asked for zoom in / zoom out on the canvas.
+
+- **Key decision: zoom scales the rendered `<svg>` element, not the viewBox.**
+  The viewBox stays `-M -M (CANVAS_W+M) (CANVAS_H+M)`; a wrapper div is sized to
+  `viewBox × zoom` CSS px and the svg fills it. Because `clientToCanvas` already
+  goes through `svg.getScreenCTM()`, **every** pointer path (draw, drag, resize,
+  rotate, marquee, ports, hit-tests) stayed correct with no maths changes. The
+  alternative — panning/scaling the viewBox — would have meant auditing all of
+  it. Nothing downstream (model, TikZ output, coords.ts) is zoom-aware.
+- **Panning is just scrolling** the wrapping viewport: middle-drag, or space +
+  drag, both implemented by writing `scrollLeft/scrollTop`. Plain wheel scrolls
+  natively; **Ctrl/Cmd + wheel zooms**.
+- **Gotcha — passive wheel listener:** React's synthetic `onWheel` is passive,
+  so `preventDefault()` there does *not* stop the browser's own page zoom. The
+  wheel handler must be a native listener added with `{ passive: false }`.
+- **Gotcha — centring vs. overflow:** `justify-content/align-items: center` puts
+  the overflow out of scroll reach once the page is bigger than the viewport.
+  Used `margin: auto` on the flex child instead, which centres while small and
+  collapses to 0 when overflowing.
+- **Cursor-anchored zoom** records the content fraction under the cursor, then
+  corrects `scrollLeft/Top` in a `useLayoutEffect` on `zoom` (after layout,
+  before paint, so there is no visible jump). Buttons/keys anchor on the
+  viewport centre instead. Measured drift: **1 px**.
+- **Screen-space vs model-space sizes.** Handles are authored in viewBox units,
+  so they are divided by zoom (`hz()`) and given `vector-effect:
+  non-scaling-stroke`; otherwise they'd balloon when zoomed in. The same applies
+  to *pick tolerances* — connector/polygon hit tests (10), connect margin (16),
+  polygon-close (10) and duplicate-click (6) are all screen distances and are
+  now `hz()`-scaled. `ALIGN = 8` was left alone: aligning a bend to a neighbour
+  is a model-space relationship, not a pick.
+- Pan takes priority via `onPointerDownCapture` + `stopPropagation` on the
+  viewport, so space-drag never draws even with a shape tool active.
+- Zoom lives in the store (`zoom`, `setZoom`, `zoomBy`; `MIN_ZOOM` 0.1 /
+  `MAX_ZOOM` 8 / `clampZoom` in `coords.ts`). Deliberately **not persisted** —
+  `saveState` still stores only projects/templates.
+- UI: floating `ZoomBar` (−, %, +, Fit) bottom-right. Shortcuts: `Ctrl +`,
+  `Ctrl -`, `Ctrl 0` (100%) in `Editor.tsx`; `Ctrl 9` (fit) lives in
+  `CanvasStage` because only it knows the viewport size.
+
+Verified in headless Chrome (puppeteer, scratchpad scripts) against the
+production build: shapes render exactly proportionally (159×120 px at 100% →
+390×293 at 244% → 52×39 at 33%); **clicking a shape's rendered centre selects it
+at 33/64/100/156/244%**, proving hit-testing and rendering agree; middle-drag and
+space-drag pan by exactly the dragged distance; space-drag with the Rect tool
+active creates nothing; plain wheel scrolls without changing zoom; Fit lands the
+page inside the viewport. `npm run typecheck` and `npm run build` clean.
+Note: the repo has **no test runner** — these were throwaway scripts, so a
+regression here would not be caught by CI. Adding Playwright would be worthwhile.
+
 ## 2026-08-19 — Raster trace quality overhaul (`importRaster.ts`)
 
 PNG/JPG tracing looked "really bad" (SVG import was fine): jagged staircase
