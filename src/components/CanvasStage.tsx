@@ -388,6 +388,10 @@ type Drag =
       oh: number;
       hx: number;
       hy: number;
+      /** World position of the dragged handle at grab time — the raw pointer
+       *  delta is applied to THIS, then snapped, so the resize never depends
+       *  on where within the handle you grabbed. */
+      corner0: Point;
     }
   | { type: "marquee"; start: Point };
 
@@ -699,6 +703,17 @@ export function CanvasStage() {
     return clampPt({ x, y });
   }
 
+  /**
+   * The pointer position without grid snap. Move/resize drags MUST start from
+   * this: snapping the grab point used to inject a phantom offset of up to a
+   * full grid cell (grab a shape 9px past a grid line, nudge 2px, and it
+   * teleported a whole cell in a direction you didn't drag). With snap on, the
+   * grid is applied to the *shape's resulting position* instead — see onMove.
+   */
+  function getRawPoint(e: React.PointerEvent): Point {
+    return clampPt(clientToCanvas(e.clientX, e.clientY));
+  }
+
   async function onDrop(e: React.DragEvent) {
     e.preventDefault();
     setDragOver(false);
@@ -867,7 +882,7 @@ export function CanvasStage() {
       ids = [shape.id];
     }
     const origs = shapes.filter((s) => ids.includes(s.id)).map((s) => ({ id: s.id, shape: s }));
-    setDrag({ type: "shape", id: shape.id, start: getPoint(e), origs });
+    setDrag({ type: "shape", id: shape.id, start: getRawPoint(e), origs });
     dragRecorded.current = false;
     svgRef.current?.setPointerCapture(e.pointerId);
   }
@@ -997,18 +1012,24 @@ export function CanvasStage() {
     if (!size) return;
     const center = shapeCenter(shape);
     const r = (rotationOf(shape) * Math.PI) / 180;
+    const u = { x: Math.cos(r), y: Math.sin(r) };
+    const v = { x: -Math.sin(r), y: Math.cos(r) };
     setDrag({
       type: "resize",
       id: shape.id,
-      start: getPoint(e),
+      start: getRawPoint(e),
       orig: shape,
       center,
-      u: { x: Math.cos(r), y: Math.sin(r) },
-      v: { x: -Math.sin(r), y: Math.cos(r) },
+      u,
+      v,
       ow: size.w,
       oh: size.h,
       hx,
       hy,
+      corner0: {
+        x: center.x + (u.x * hx * size.w) / 2 + (v.x * hy * size.h) / 2,
+        y: center.y + (u.y * hx * size.w) / 2 + (v.y * hy * size.h) / 2,
+      },
     });
     dragRecorded.current = false;
     svgRef.current?.setPointerCapture(e.pointerId);
@@ -1097,6 +1118,12 @@ export function CanvasStage() {
         }
         return;
       }
+      // Raw pointer position: move/resize deltas are computed from this, and
+      // the grid is applied to the shape's RESULTING position. Snapping the
+      // pointer itself (as `getPoint` does) made the grab point jump to the
+      // nearest grid point, teleporting the shape by up to a full cell in a
+      // direction the mouse never travelled.
+      const raw = getRawPoint(e);
       const p = getPoint(e);
       if (drag.type === "marquee") {
         setMarquee({
@@ -1107,29 +1134,49 @@ export function CanvasStage() {
         });
         return;
       }
-      const moved = p.x !== drag.start.x || p.y !== drag.start.y;
+      const moved = raw.x !== drag.start.x || raw.y !== drag.start.y;
       if (!moved) return;
       recordOnce();
       switch (drag.type) {
         case "shape": {
-          const dx = p.x - drag.start.x;
-          const dy = p.y - drag.start.y;
+          const rawDx = raw.x - drag.start.x;
+          const rawDy = raw.y - drag.start.y;
+          let dx = rawDx;
+          let dy = rawDy;
+          if (snap) {
+            // Quantise relative to the grabbed shape's own corner, so the
+            // whole (multi-)selection moves rigidly in grid steps and lands
+            // with that corner on the grid.
+            const primary = drag.origs.find((o) => o.id === drag.id) ?? drag.origs[0];
+            const ref = bbox(primary.shape);
+            dx = snapToGrid(ref.x + rawDx) - ref.x;
+            dy = snapToGrid(ref.y + rawDy) - ref.y;
+          }
           for (const o of drag.origs) updateShape(o.id, translate(o.shape, dx, dy));
           break;
         }
         case "rotate": {
-          let deg = (Math.atan2(p.y - drag.center.y, p.x - drag.center.x) * 180) / Math.PI + 90;
+          let deg = (Math.atan2(raw.y - drag.center.y, raw.x - drag.center.x) * 180) / Math.PI + 90;
           if (snap) deg = Math.round(deg / 15) * 15; // snap to 15° steps
           updateShape(drag.id, { rotation: ((deg % 360) + 360) % 360 });
           break;
         }
         case "resize": {
-          const { center, u, v, ow, oh, hx, hy } = drag;
+          const { center, u, v, ow, oh, hx, hy, corner0 } = drag;
           // Fixed corner/edge (opposite the dragged handle) in world space.
           const fx = center.x + u.x * (-hx * ow) / 2 + v.x * (-hy * oh) / 2;
           const fy = center.y + u.y * (-hx * ow) / 2 + v.y * (-hy * oh) / 2;
-          const rx = p.x - fx;
-          const ry = p.y - fy;
+          // The dragged handle's new position = its original corner plus the
+          // raw pointer travel (never the pointer position itself — grabbing
+          // the 8px handle slightly off-centre must not change the size).
+          let mx = corner0.x + (raw.x - drag.start.x);
+          let my = corner0.y + (raw.y - drag.start.y);
+          if (snap) {
+            mx = snapToGrid(mx);
+            my = snapToGrid(my);
+          }
+          const rx = mx - fx;
+          const ry = my - fy;
           const du = rx * u.x + ry * u.y; // projection onto local x axis
           const dv = rx * v.x + ry * v.y; // onto local y axis
           let nw = hx ? Math.max(4, Math.abs(du)) : ow;

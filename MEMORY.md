@@ -6,6 +6,37 @@ A running log of decisions, changes, and gotchas for the **TikDrawer** project.
 
 ---
 
+## 2026-08-19 — Fix: snap teleported shapes on grab (the real "jump" bug)
+
+User: still jumping after the wheel fix; asked if it depends on "the ratio of
+the ruler". Systematic hunt (pointer travel vs model movement, all zooms ×
+ruler on/off × DPR 1/1.25/2) showed pixel-perfect drags everywhere — the
+earlier harness "failures" were the harness clicking scroll-clipped points.
+
+- **Actual root cause — snap-on grab-point quantisation** (pre-dates zoom;
+  zoom made it *look* worse because the hop scales with the zoom ratio —
+  that was the "ratio" the user sensed; the ruler itself is irrelevant, the
+  CTM absorbs the gutter): `drag.start` came from `getPoint(e)` which
+  **snaps the pointer to the grid**. Grabbing a shape 9px past a grid line
+  and nudging 2px applied a full-cell delta in a direction the mouse never
+  travelled — reproduced: 2px nudge → 0.5cm diagonal teleport. Same flaw in
+  resize: the grabbed handle's snapped pointer position replaced the corner,
+  so grab-offset changed the size.
+- **Fix (CanvasStage.tsx), the draw.io/Figma convention:** drags start from
+  `getRawPoint` (clamped, unsnapped); deltas are raw; with snap on the grid
+  is applied to the shape's *resulting position*, not the pointer:
+  - move: `dx = snapToGrid(refCorner.x + rawDx) - refCorner.x` where
+    `refCorner` = bbox origin of the grabbed shape (whole multi-selection
+    moves rigidly; corner lands on grid; a click can never displace).
+  - resize: new `corner0` field on the resize Drag = dragged handle's world
+    position at grab; moved corner = `corner0 + rawDelta`, then snapped.
+  - rotate uses the raw pointer (angle snap is separate).
+- Verified headless-Chrome, production build: 2px nudge now at most aligns
+  the corner to the nearest grid point (≤ half cell, no teleport); +100px
+  snap drag = exactly +2.5cm in single-cell hops; 1px resize nudge = 0.000cm
+  size change; snap resize +100px = exactly +2.5cm; snap-off drags stay
+  pixel-perfect at 51–244% and DPR 1/1.25/2; wheel-mid-drag fix unregressed.
+
 ## 2026-08-19 — Fix: shapes jumped during move/resize (wheel scroll mid-drag)
 
 User report after the zoom feature: moving or resizing a shape "sometimes
