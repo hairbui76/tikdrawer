@@ -470,6 +470,11 @@ export function CanvasStage() {
   // new zoom has been laid out.
   const zoomAnchorRef = useRef<{ fx: number; fy: number; cx: number; cy: number } | null>(null);
   const panRef = useRef<{ cx: number; cy: number; left: number; top: number } | null>(null);
+  // Mirror of `drag` for the native wheel listener (which sees stale closures).
+  const dragStateRef = useRef<Drag | null>(null);
+  useEffect(() => {
+    dragStateRef.current = drag;
+  }, [drag]);
 
   /** Zoom by `factor`, keeping the point under (cx, cy) visually fixed. */
   function zoomAt(factor: number, cx: number, cy: number) {
@@ -502,6 +507,15 @@ export function CanvasStage() {
     const el = scrollRef.current;
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
+      // Scrolling (or zooming) mid-drag shifts the canvas under the pointer;
+      // drag positions come from client coords via the CTM, so the dragged
+      // shape would jump by the scrolled amount. A grazed wheel or trackpad
+      // inertia from an earlier pan does this by accident — swallow the wheel
+      // until the interaction ends.
+      if (dragStateRef.current || startRef.current) {
+        e.preventDefault();
+        return;
+      }
       if (!e.ctrlKey && !e.metaKey) return;
       e.preventDefault();
       // Exponential so each notch is a constant *ratio*, and trackpads (which
@@ -1239,9 +1253,10 @@ export function CanvasStage() {
         className={`flex h-full w-full select-none overflow-auto ${dragOver ? "bg-blue-100" : "bg-slate-100"}`}
         style={{ padding: PAD }}
         // Capture phase, so a pan takes precedence over the drawing/selection
-        // handlers on the <svg> and on individual shapes.
+        // handlers on the <svg> and on individual shapes. Never while another
+        // drag is live: scrolling would shift the canvas under that drag.
         onPointerDownCapture={(e) => {
-          if (e.button !== 1 && !spaceDown) return;
+          if ((e.button !== 1 && !spaceDown) || drag || startRef.current) return;
           e.stopPropagation();
           startPan(e);
         }}
@@ -1273,6 +1288,9 @@ export function CanvasStage() {
             onPointerMove={onMove}
             onPointerUp={onUp}
             onPointerLeave={onUp}
+            // A cancelled pointer (browser gesture takeover) would otherwise
+            // leave `drag` latched, and the shape would follow the bare cursor.
+            onPointerCancel={onUp}
             onDoubleClick={(e) => {
               if (poly) {
                 commitPoly(poly);

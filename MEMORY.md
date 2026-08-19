@@ -6,6 +6,33 @@ A running log of decisions, changes, and gotchas for the **TikDrawer** project.
 
 ---
 
+## 2026-08-19 — Fix: shapes jumped during move/resize (wheel scroll mid-drag)
+
+User report after the zoom feature: moving or resizing a shape "sometimes
+jumps to another position".
+
+- **Root cause (reproduced, not guessed):** the zoom work made the canvas
+  viewport scrollable. A wheel/trackpad scroll arriving *during* a drag —
+  a grazed wheel, or two-finger inertia left over from a pan — scrolls the
+  canvas under the stationary cursor. Drag positions are client coords mapped
+  through the SVG CTM, so the shift reads as pointer movement: in the repro,
+  a deltaY=150 wheel mid-drag teleported the shape 1.5 cm instantly. Resize
+  uses the same `getPoint` path and jumped identically.
+- **Fix (CanvasStage.tsx):** the native wheel listener now swallows *all*
+  wheel events while `drag` or `startRef` is live (state mirrored into
+  `dragStateRef`, because the native listener sees stale closures). The pan
+  capture handler also refuses to start (middle-click or space) while another
+  drag is active. Added `onPointerCancel={onUp}` so a browser-cancelled
+  pointer can't leave `drag` latched with the shape following the bare cursor.
+- Verified in headless Chrome: with the wheel fired mid-drag, move steps are a
+  uniform 0.051 cm and resize steps 0.077 cm (before: 1.5 cm discontinuity);
+  idle middle-drag pan still scrolls by exactly the dragged distance.
+- **Testing gotcha for this app:** `page.$eval("pre", …)` grabs the *preview
+  panel's* error `<pre>` ("pdflatex not found") once the render debounce
+  fires — select the code panel by filtering for `tikzpicture` content.
+  Also: with snap on, drags legitimately step by 0.5 cm (the grid), which a
+  naive "jump detector" flags — disable snap when measuring smoothness.
+
 ## 2026-08-19 — Canvas zoom & pan
 
 Asked for zoom in / zoom out on the canvas.
