@@ -3,11 +3,13 @@
 // Unlike importSvg, a bitmap carries no geometry — there is nothing to read,
 // only pixels — so the shapes have to be *inferred*:
 //
-//   1. quantise the pixels down to a small palette (median cut),
+//   1. quantise the pixels down to a small palette (median cut), merging
+//      near-duplicate colours and despeckling the result — JPEG noise and
+//      anti-alias halos otherwise become thousands of junk regions,
 //   2. label 4-connected regions of each palette colour,
 //   3. trace each region's outline by crack following (walk the boundary
 //      between inside/outside pixels on the corner lattice),
-//   4. simplify the staircase outline with Douglas-Peucker,
+//   4. smooth the staircase (edge midpoints) and simplify with Douglas-Peucker,
 //   5. emit one closed `polygon` shape per region, largest first.
 //
 // Step 5's ordering is what makes holes work without even-odd fills: the white
@@ -60,7 +62,7 @@ export type TraceResult = {
 
 /** Longest side the image is resampled to before tracing. Bigger means slower
  *  and far more vertices, without much visible gain after simplification. */
-const WORK_MAX = 400;
+const WORK_MAX = 512;
 
 /** Hard caps so a photograph can't produce an unusable (or unrenderable) doc. */
 const MAX_SHAPES = 400;
@@ -93,8 +95,10 @@ function histogram(data: Uint8ClampedArray): Hist {
 
 type Box = { keys: number[]; count: number };
 
-/** Median-cut quantisation → up to `n` representative colours as [r,g,b]. */
-function medianCut(hist: Hist, n: number): number[][] {
+type PaletteEntry = { color: number[]; count: number };
+
+/** Median-cut quantisation → up to `n` representative colours with coverage. */
+function medianCut(hist: Hist, n: number): PaletteEntry[] {
   const keys: number[] = [];
   let total = 0;
   for (let k = 0; k < CUBE; k++) {
@@ -145,7 +149,7 @@ function medianCut(hist: Hist, n: number): number[][] {
       g += hist.sum[k * 3 + 1];
       b += hist.sum[k * 3 + 2];
     }
-    return c ? [r / c, g / c, b / c] : [0, 0, 0];
+    return { color: c ? [r / c, g / c, b / c] : [0, 0, 0], count: c };
   });
 
   function widestChannel(ks: number[]): 0 | 1 | 2 {
@@ -161,6 +165,68 @@ function medianCut(hist: Hist, n: number): number[][] {
     const span = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
     if (span[0] >= span[1] && span[0] >= span[2]) return 0;
     return span[1] >= span[2] ? 1 : 2;
+  }
+}
+
+/**
+ * Merge palette entries closer than `dist` (Euclidean RGB), coverage-weighted.
+ * Median cut on a JPEG readily produces two near-identical colours for one flat
+ * area (compression noise pushes pixels across a bucket boundary); the boundary
+ * between them then traces as a ragged, meaningless region edge. Never merges
+ * below two colours so the background/foreground split survives.
+ */
+function mergeClose(entries: PaletteEntry[], dist: number): PaletteEntry[] {
+  const d2 = dist * dist;
+  let merged = true;
+  while (merged && entries.length > 2) {
+    merged = false;
+    outer: for (let i = 0; i < entries.length; i++) {
+      for (let j = i + 1; j < entries.length; j++) {
+        const a = entries[i], b = entries[j];
+        const dr = a.color[0] - b.color[0];
+        const dg = a.color[1] - b.color[1];
+        const db = a.color[2] - b.color[2];
+        if (dr * dr + dg * dg + db * db < d2) {
+          const n = a.count + b.count;
+          a.color = a.color.map((v, k) => (v * a.count + b.color[k] * b.count) / n);
+          a.count = n;
+          entries.splice(j, 1);
+          merged = true;
+          break outer;
+        }
+      }
+    }
+  }
+  entries.sort((a, b) => b.count - a.count);
+  return entries;
+}
+
+/**
+ * Majority-vote cleanup of the quantised index map. A pixel with at most one
+ * 8-neighbour of its own colour is JPEG noise or an anti-alias halo speck —
+ * reassign it to the dominant colour around it. A continuous 1px line keeps two
+ * same-colour neighbours along its length, so deliberate line art survives.
+ */
+function despeckle(idx: Int16Array, w: number, h: number, passes: number): void {
+  const counts = new Int32Array(18); // palette indices -1..16, offset by 1
+  for (let pass = 0; pass < passes; pass++) {
+    const prev = Int16Array.from(idx);
+    let changed = false;
+    for (let y = 0; y < h; y++) {
+      const y0 = Math.max(0, y - 1), y1 = Math.min(h - 1, y + 1);
+      for (let x = 0; x < w; x++) {
+        const x0 = Math.max(0, x - 1), x1 = Math.min(w - 1, x + 1);
+        counts.fill(0);
+        for (let yy = y0; yy <= y1; yy++)
+          for (let xx = x0; xx <= x1; xx++) counts[prev[yy * w + xx] + 1]++;
+        const c = prev[y * w + x];
+        if (counts[c + 1] > 2) continue; // itself + ≥2 allies → keep
+        let mode = c, modeN = 0;
+        for (let k = 0; k < 18; k++) if (counts[k] > modeN) { modeN = counts[k]; mode = k - 1; }
+        if (mode !== c) { idx[y * w + x] = mode; changed = true; }
+      }
+    }
+    if (!changed) break;
   }
 }
 
@@ -250,6 +316,25 @@ function simplify(pts: Point[], eps: number): Point[] {
   return pts.filter((_, i) => keep[i]);
 }
 
+/**
+ * Replace each lattice point with the midpoint of its outgoing edge. Crack
+ * following yields a staircase of unit steps with only 90° turns; midpoints
+ * halve the step amplitude and turn 45° stairs into true diagonals, so the
+ * simplification pass afterwards produces clean slanted edges instead of either
+ * jagged steps (small eps) or blocky chords (large eps). True corners only
+ * round by half a work pixel — invisible at canvas scale.
+ */
+function smoothRing(ring: Point[]): Point[] {
+  const n = ring.length;
+  if (n < 3) return ring;
+  const out = new Array<Point>(n);
+  for (let i = 0; i < n; i++) {
+    const a = ring[i], b = ring[(i + 1) % n];
+    out[i] = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  }
+  return out;
+}
+
 /** Simplify a closed ring: temporarily reopen it so DP has fixed endpoints. */
 function simplifyRing(ring: Point[], eps: number): Point[] {
   if (ring.length < 4) return ring;
@@ -291,7 +376,7 @@ export function traceRgba(
   target: Target = fitTarget(w, h),
 ): TraceResult {
   const colors = Math.max(2, Math.min(16, Math.round(opts.colors)));
-  const palette = medianCut(histogram(data), colors);
+  const palette = mergeClose(medianCut(histogram(data), colors), 32).map((e) => e.color);
   if (!palette.length) return { shapes: [], regions: 0, dropped: 0, vertices: 0, palette: [] };
 
   // Snap every pixel to its nearest palette entry (-1 = transparent).
@@ -310,6 +395,8 @@ export function traceRgba(
     idx[p] = best;
   }
 
+  despeckle(idx, w, h, 2);
+
   // The background is whatever colour dominates the border pixels.
   let bg = -1;
   if (opts.dropBackground) {
@@ -319,6 +406,9 @@ export function traceRgba(
     for (let y = 0; y < h; y++) { bump(y * w); bump(y * w + w - 1); }
     let bestN = 0;
     for (let c = 0; c < palette.length; c++) if (tally[c] > bestN) { bestN = tally[c]; bg = c; }
+    // On a transparent-background PNG the border is mostly alpha; whatever few
+    // coloured pixels touch it are artwork, not a backdrop — don't drop them.
+    if (bestN * 4 < 2 * (w + h)) bg = -1;
   }
 
   // Label 4-connected regions (iterative flood fill — deep recursion would blow
@@ -365,9 +455,14 @@ export function traceRgba(
   // enclosed background region back into a visible hole.
   keep.sort((a, b) => b.area - a.area);
 
-  const eps = 0.5 + (1 - Math.max(0, Math.min(1, opts.detail))) * 5.5;
   const sx = target.w / w;
   const sy = target.h / h;
+  // The tolerance is spent in *canvas* pixels, so the detail slider means the
+  // same thing whatever the working resolution or how far the trace is scaled
+  // up. The 0.5 work-px floor lets DP collapse the smoothed staircase into
+  // clean diagonals instead of keeping every half-step.
+  const detail = Math.max(0, Math.min(1, opts.detail));
+  const eps = Math.max(0.5, (0.5 + (1 - detail) * (1 - detail) * 6) / sx);
 
   const shapes: Shape[] = [];
   let vertices = 0;
@@ -377,7 +472,7 @@ export function traceRgba(
     // enough to clean up big shapes would collapse small ones to nothing.
     const regEps = Math.min(eps, 0.25 * Math.max(1, Math.min(reg.x1 - reg.x0 + 1, reg.y1 - reg.y0 + 1)));
     const ring = capVertices(
-      simplifyRing(traceContour(labels, w, h, reg.label, reg.sx, reg.sy), regEps),
+      simplifyRing(smoothRing(traceContour(labels, w, h, reg.label, reg.sx, reg.sy)), regEps),
       MAX_VERTICES_PER_SHAPE,
     );
     if (ring.length < 3) continue;
@@ -423,8 +518,10 @@ function decode(dataUrl: string, maxDim: number): Promise<{ data: Uint8ClampedAr
       canvas.height = h;
       const ctx = canvas.getContext("2d", { willReadFrequently: true });
       if (!ctx) return reject(new Error("no 2d context"));
-      // Smoothing averages away single-pixel noise before quantisation.
+      // Smoothing averages away single-pixel noise before quantisation; "high"
+      // avoids the aliasing a naive box-filter downscale adds on big photos.
       ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
       ctx.drawImage(img, 0, 0, w, h);
       resolve({ data: ctx.getImageData(0, 0, w, h).data, w, h });
     };

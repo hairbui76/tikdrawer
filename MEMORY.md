@@ -6,6 +6,44 @@ A running log of decisions, changes, and gotchas for the **TikDrawer** project.
 
 ---
 
+## 2026-08-19 — Raster trace quality overhaul (`importRaster.ts`)
+
+PNG/JPG tracing looked "really bad" (SVG import was fine): jagged staircase
+edges, blocky outlines at the default detail, and JPEG noise / anti-alias halos
+turning into speckle shapes and ragged colour boundaries. Five fixes, all in
+`src/lib/importRaster.ts`:
+
+- **Staircase smoothing (`smoothRing`)** — the crack-followed contour is
+  replaced by its edge midpoints *before* Douglas-Peucker. 45° stairs become
+  true diagonals (a synthetic diamond now traces to exactly 4 vertices at 45.0°,
+  previously a staircase); real corners round by only half a work px.
+- **Tolerance now in canvas px, not work px** — old eps was `0.5+(1-detail)*5.5`
+  at work resolution, i.e. ~3.25 px *before* the ~1.5–2.6× upscale onto the
+  canvas → chunky chords at the default. New: `max(0.5, (0.5+(1-detail)²*6)/sx)`
+  so the detail slider means the same thing regardless of image size; the 0.5
+  work-px floor lets DP collapse the smoothed staircase into clean diagonals.
+- **`despeckle`** (2 majority-vote passes on the quantised index map) — a pixel
+  with ≤1 same-colour 8-neighbour is noise/halo and snaps to the local mode.
+  Continuous 1px lines have 2 allies and survive; only open line *ends* erode
+  (by ≤2 px). This is the deliberate trade-off.
+- **`mergeClose`** (coverage-weighted, threshold **32** Euclidean RGB, never
+  below 2 colours) — median cut on a JPEG splits one flat area into
+  near-identical colours whose boundary traces as garbage. Threshold 24 was too
+  tight in testing (±15/channel noise → distance ~26 survived, 332 junk shapes);
+  32 collapsed the same test to 2 shapes. `medianCut` now returns
+  `{color,count}` entries to make the weighting possible.
+- **Transparent-PNG background guard** — only drop the border-dominant colour as
+  background if it covers ≥25% of the border samples; otherwise a logo touching
+  the edge of a transparent PNG lost body parts.
+- Also: `WORK_MAX` 400→512, `imageSmoothingQuality="high"` in `decode`.
+
+Verified with synthetic tests (`tsx`, pure `traceRgba`): clean AA disc → 32
+verts, radius deviation ~1 work px; noisy disc → 1 shape, 136 speckles dropped;
+transparent-bg logo touching border → kept; 512² photo-like worst case 231 ms
+(fine behind the dialog's 150 ms debounce). `npm run typecheck` clean. No
+covering unit tests exist yet — `traceRgba` is pure and testable, a vitest
+suite over these synthetic cases would be a good follow-up.
+
 ## 2026-08-19 — Adjustable label size (`Style.fontSize`) + measured text metrics
 
 Follow-up to the SVG import fixes: labels all rendered at one hard-coded size,
