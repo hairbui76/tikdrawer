@@ -2,6 +2,7 @@
 
 import { resizeShape, sideToAngle, sizeOf } from "@/lib/geometry";
 import { useShapes, useStore } from "@/lib/store";
+import { DEFAULT_FONT_PT, fontPtOf } from "@/lib/text";
 import {
 	SIDES_8,
 	type ArrowStyle,
@@ -9,6 +10,9 @@ import {
 	type Shape,
 	type Side,
 } from "@/lib/types";
+
+/** Trim the float that comes out of scaling an imported font size. */
+const round1 = (n: number): number => Math.round(n * 10) / 10;
 
 const ROTATABLE = new Set<Shape["kind"]>([
 	"rect",
@@ -225,17 +229,39 @@ export function PropertiesPanel() {
 			{sizeOf(shape) && <SizeControls shape={shape} />}
 
 			{TEXTABLE.has(shape.kind) && (
-				<label className="flex flex-col gap-1">
-					<span className="text-slate-600">Text</span>
-					<input
-						type="text"
-						value={shapeText(shape) ?? ""}
-						onFocus={() => beginChange()}
-						onChange={(e) => updateShape(shape.id, { text: e.target.value })}
-						className="rounded border border-slate-300 px-2 py-1"
-						placeholder="(double-click shape too)"
-					/>
-				</label>
+				<>
+					<label className="flex flex-col gap-1">
+						<span className="text-slate-600">Text</span>
+						<input
+							type="text"
+							value={shapeText(shape) ?? ""}
+							onFocus={() => beginChange()}
+							onChange={(e) => updateShape(shape.id, { text: e.target.value })}
+							className="rounded border border-slate-300 px-2 py-1"
+							placeholder="(double-click shape too)"
+						/>
+					</label>
+
+					<label
+						className="flex items-center justify-between gap-2"
+						title="Label size in pt — the same unit as line width, and what the TikZ output uses"
+					>
+						<span className="text-slate-600">Text size</span>
+						<input
+							type="number"
+							min={1}
+							step={0.5}
+							value={round1(fontPtOf(st))}
+							onFocus={() => beginChange()}
+							onChange={(e) =>
+								updateShapeStyle(shape.id, {
+									fontSize: Math.max(1, Number(e.target.value) || DEFAULT_FONT_PT),
+								})
+							}
+							className="w-20 rounded border border-slate-300 px-2 py-1"
+						/>
+					</label>
+				</>
 			)}
 
 			<label className="flex items-center justify-between gap-2">

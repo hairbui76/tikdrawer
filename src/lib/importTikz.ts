@@ -8,7 +8,7 @@
 // (model → TikZ → render). It exists because the user asked to open external
 // .tex/.svg files as editable drawings. See MEMORY.md.
 
-import { CANVAS_H, CANVAS_W, cmToLen, cmToPxX, cmToPxY, UNIT_PER_CM } from "./coords";
+import { CANVAS_H, CANVAS_W, cmToLen, cmToPxX, cmToPxY, round, UNIT_PER_CM } from "./coords";
 import { DEFAULT_STYLE, type Point, type Shape, type Style } from "./types";
 
 const uid = (): string =>
@@ -122,6 +122,15 @@ function parseOpts(opts: string): ParsedOpts {
       case "line width":
         style.lineWidth = lenToCmValue(val) * UNIT_PER_CM.pt; // back to pt
         break;
+      case "font": {
+        // `font=\fontsize{11.4}{13.7}\selectfont`, as generateTikz emits. Relative
+        // size commands (\large, \small) carry no absolute pt value, so they are
+        // left alone and the label keeps the default size.
+        const m = /\\fontsize\s*\{\s*([\d.]+)/.exec(val);
+        const v = m ? parseFloat(m[1]) : NaN;
+        if (v > 0) style.fontSize = v;
+        break;
+      }
       case "very thin": style.lineWidth = 0.5; break;
       case "thin": style.lineWidth = 0.8; break;
       case "thick": style.lineWidth = 1.6; break;
@@ -174,7 +183,10 @@ const KEYWORDS = /^(cycle|controls|and|rectangle|circle|ellipse|node|arc|grid|co
 
 function tokenizePath(path: string): Tok[] {
   const toks: Tok[] = [];
-  const re = /\(([^)]*)\)|(--)|(\.\.)|\{([^{}]*)\}|\[[^\]]*\]|([A-Za-z][A-Za-z ]*[A-Za-z]|[A-Za-z])/g;
+  // The `{…}` alternative allows one level of nesting so that inline labels
+  // containing a brace group (`\textasciitilde{}`, `\textbf{x}`) stay in one
+  // piece instead of matching only their inner `{}`.
+  const re = /\(([^)]*)\)|(--)|(\.\.)|\{((?:[^{}]|\{[^{}]*\})*)\}|\[[^\]]*\]|([A-Za-z][A-Za-z ]*[A-Za-z]|[A-Za-z])/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(path))) {
     if (m[1] !== undefined) {
@@ -309,16 +321,51 @@ function drawToShapes(optsStr: string, path: string): Shape[] {
 
 /* --------------------------------- nodes ---------------------------------- */
 
+/**
+ * Undo `escapeTexText`, so generate → import round-trips back to the text the
+ * user actually typed rather than to its escaped form. Order matters:
+ * `\textbackslash{}` must be restored last or its own backslash gets unescaped
+ * a second time.
+ */
+export function unescapeTexText(text: string): string {
+  return text
+    .replace(/\\textasciitilde\{\}/g, "~")
+    .replace(/\\textasciicircum\{\}/g, "^")
+    .replace(/\\([&%$#_{}])/g, "$1")
+    .replace(/\\textbackslash\{\}/g, "\\");
+}
+
+/**
+ * Body of the first `{…}` group, honouring nesting and backslash-escaped
+ * braces. The previous `lastIndexOf("{")` shortcut silently mangled any label
+ * that itself contained a brace — `{\{ "a":1 \}}` came back as `"a":1 }`, and
+ * `\textasciitilde{}` swallowed everything before its `{}`.
+ */
+function braceBody(s: string): string {
+  let start = -1;
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === "\\") i++; // escaped char: never a delimiter
+    else if (s[i] === "{") { start = i; break; }
+  }
+  if (start < 0) return "";
+  let depth = 0;
+  for (let i = start; i < s.length; i++) {
+    if (s[i] === "\\") i++;
+    else if (s[i] === "{") depth++;
+    else if (s[i] === "}" && --depth === 0) return s.slice(start + 1, i);
+  }
+  return s.slice(start + 1); // unterminated — take what there is
+}
+
 // \node[opts] (name) at (x,y) {text};
 function nodeToShape(optsStr: string, rest: string): Shape | null {
   const at = /at\s*\(([^)]*)\)/i.exec(rest);
   const pt = at ? parseCoord(at[1]) : firstCoordInText(rest);
   if (!pt) return null;
-  const braceStart = rest.lastIndexOf("{");
-  const text = braceStart >= 0 ? rest.slice(braceStart + 1, rest.lastIndexOf("}")) : "";
+  const text = braceBody(rest);
   const { style } = parseOpts(optsStr);
   // `text=<color>` sets the label color → treat as stroke.
-  return { id: uid(), kind: "node", at: pt, text: text.trim(), style };
+  return { id: uid(), kind: "node", at: pt, text: unescapeTexText(text.trim()), style };
 }
 
 function firstCoordInText(s: string): Point | null {
@@ -457,28 +504,35 @@ function shapePoints(s: Shape): Point[] {
 }
 
 function transformShape(s: Shape, tx: (p: Point) => Point, scale: number): Shape {
-  switch (s.kind) {
+  // Stroke width and text size have to shrink with the drawing too. Leaving the
+  // width alone is what made a scaled-down import look like it had been drawn
+  // with a marker pen: at scale 0.45 a 4pt outline is over three times too heavy
+  // for the geometry it traces, and small icons fill in solid.
+  const style: Style = { ...s.style, lineWidth: Math.max(0.05, round(s.style.lineWidth * scale)) };
+  if (s.style.fontSize) style.fontSize = Math.max(0.5, round(s.style.fontSize * scale));
+  const s2 = { ...s, style };
+  switch (s2.kind) {
     case "line":
     case "rect":
     case "diamond":
     case "roundrect":
     case "cylinder":
     case "image":
-      return { ...s, p1: tx(s.p1), p2: tx(s.p2) };
+      return { ...s2, p1: tx(s2.p1), p2: tx(s2.p2) };
     case "circle":
-      return { ...s, center: tx(s.center), r: s.r * scale };
+      return { ...s2, center: tx(s2.center), r: s2.r * scale };
     case "ellipse":
-      return { ...s, center: tx(s.center), rx: s.rx * scale, ry: s.ry * scale };
+      return { ...s2, center: tx(s2.center), rx: s2.rx * scale, ry: s2.ry * scale };
     case "node":
-      return { ...s, at: tx(s.at) };
+      return { ...s2, at: tx(s2.at) };
     case "polygon":
-      return { ...s, points: s.points.map(tx) };
+      return { ...s2, points: s2.points.map(tx) };
     case "connector":
       return {
-        ...s,
-        from: { ...s.from, point: tx(s.from.point) },
-        to: { ...s.to, point: tx(s.to.point) },
-        waypoints: s.waypoints.map(tx),
+        ...s2,
+        from: { ...s2.from, point: tx(s2.from.point) },
+        to: { ...s2.to, point: tx(s2.to.point) },
+        waypoints: s2.waypoints.map(tx),
       };
   }
 }

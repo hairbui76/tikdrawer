@@ -2,8 +2,11 @@
 
 import { useState } from "react";
 import { openProjectFromFile, rememberHandle, saveProjectToFile, signatureOf } from "@/lib/files";
+import { FILL_CANVAS_DIM, fileToAsset, imageShapeFor } from "@/lib/images";
 import { useCurrentProject, useShapes, useStore } from "@/lib/store";
 import { TEMPLATES } from "@/lib/templates";
+import type { ImageAsset, Shape } from "@/lib/types";
+import { OpenImageDialog } from "./OpenImageDialog";
 
 export function ProjectBar() {
   const projects = useStore((s) => s.projects);
@@ -22,8 +25,11 @@ export function ProjectBar() {
   const setShowRuler = useStore((s) => s.setShowRuler);
   const unit = useStore((s) => s.unit);
   const setUnit = useStore((s) => s.setUnit);
+  const addImage = useStore((s) => s.addImage);
   const shapes = useShapes();
   const [tpl, setTpl] = useState("");
+  // A bitmap picked in "Open file", waiting for the place-or-trace choice.
+  const [pendingImage, setPendingImage] = useState<{ name: string; asset: ImageAsset } | null>(null);
 
   const dirty = savedSig[current.id] !== signatureOf(current.name, shapes);
 
@@ -39,6 +45,15 @@ export function ProjectBar() {
       window.alert("Nothing to import — the file wasn't a TikDrawer drawing, a tikzpicture, or a recognisable SVG.");
       return;
     }
+    // A bitmap can't be read as geometry, so ask whether to place or trace it.
+    if (res.kind === "raster") {
+      try {
+        setPendingImage({ name: res.name, asset: await fileToAsset(res.file) });
+      } catch {
+        window.alert("That image could not be read.");
+      }
+      return;
+    }
     newProjectFromShapes(res.name, res.shapes);
     const id = useStore.getState().currentProjectId;
     if (res.kind === "json") {
@@ -48,6 +63,19 @@ export function ProjectBar() {
     }
     // Imported .tex/.svg stay "unsaved" so the next Save writes a .tikz.json
     // rather than overwriting the source file.
+  }
+
+  /** Open an image as a new drawing — the picture itself, or its traced shapes. */
+  function openImageAs(name: string, asset: ImageAsset, traced: Shape[] | null) {
+    if (traced) {
+      newProjectFromShapes(name, traced);
+    } else {
+      // Only register the asset when it is actually used, so tracing doesn't
+      // leave an unused image behind in the library.
+      addImage(asset);
+      newProjectFromShapes(name, [imageShapeFor(asset, FILL_CANVAS_DIM)]);
+    }
+    setPendingImage(null);
   }
 
   const tplShapes = () => {
@@ -115,7 +143,7 @@ export function ProjectBar() {
       </button>
       <button
         onClick={openFromFile}
-        title="Open a drawing (.tikz.json), a TikZ file (.tex/.tikz), or an SVG — imported as editable shapes"
+        title="Open a drawing (.tikz.json), a TikZ file (.tex/.tikz), an SVG, or an image (.png/.jpg/.webp)"
         className="rounded border border-slate-300 bg-white px-2 py-1 text-sm hover:bg-slate-100"
       >
         📂 Open file
@@ -263,6 +291,16 @@ export function ProjectBar() {
       >
         Clear
       </button>
+
+      {pendingImage && (
+        <OpenImageDialog
+          name={pendingImage.name}
+          dataUrl={pendingImage.asset.dataUrl}
+          onPlace={() => openImageAs(pendingImage.name, pendingImage.asset, null)}
+          onTrace={(traced) => openImageAs(pendingImage.name, pendingImage.asset, traced)}
+          onCancel={() => setPendingImage(null)}
+        />
+      )}
     </div>
   );
 }

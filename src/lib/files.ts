@@ -53,22 +53,37 @@ function downloadText(filename: string, text: string): void {
 }
 
 /** File kinds the "Open file" action accepts. `json` is a native drawing;
- *  `tex`/`svg` are external files parsed into (editable) shapes. */
-type OpenKind = "json" | "tex" | "svg";
+ *  `tex`/`svg` are external files parsed into (editable) shapes; `raster` is a
+ *  bitmap, which has no geometry to read and so is handed back undecided — the
+ *  caller asks whether to place it or trace it (see importRaster). */
+type OpenKind = "json" | "tex" | "svg" | "raster";
+
+/** Bitmap formats. Matched on the filename first because `image/svg+xml` also
+ *  starts with `image/`, and SVG must keep going down the vector path. */
+const RASTER_EXT = /\.(png|jpe?g|webp)$/i;
+const isRaster = (file: File): boolean =>
+  RASTER_EXT.test(file.name) || /^image\/(png|jpeg|webp)$/i.test(file.type);
 
 /** Drop an extension and turn a filename into a drawing name. */
 function nameFromFile(filename: string): string {
-  return filename.replace(/\.(json|tex|tikz|svg)$/i, "").replace(/[_-]+/g, " ").trim() || "Imported";
+  return filename
+    .replace(/\.(json|tex|tikz|svg|png|jpe?g|webp)$/i, "")
+    .replace(/[_-]+/g, " ")
+    .trim() || "Imported";
 }
 
+type ParsedFile = { name: string; shapes: Shape[]; kind: Exclude<OpenKind, "raster"> };
+
 /**
- * Parse an opened file into a drawing. Detects the format from the filename and,
- * as a fallback, the contents:
+ * Parse an opened text file into a drawing. Detects the format from the filename
+ * and, as a fallback, the contents:
  * - `.json` (TikDrawer native)   → shapes verbatim.
  * - `.tex` / `.tikz` (tikzpicture) → parsed into editable shapes (importTikz).
  * - `.svg`                         → parsed into editable shapes (importSvg).
+ *
+ * Bitmaps never reach here — `openProjectFromFile` splits them off first.
  */
-function parse(text: string, filename: string): { name: string; shapes: Shape[]; kind: OpenKind } | null {
+function parse(text: string, filename: string): ParsedFile | null {
   const ext = /\.(json|tex|tikz|svg)$/i.exec(filename)?.[1]?.toLowerCase();
 
   // Native JSON drawing.
@@ -99,8 +114,21 @@ function parse(text: string, filename: string): { name: string; shapes: Shape[];
 }
 
 const OPEN_ACCEPT_TYPES = [
-  { description: "Drawing / TikZ / SVG", accept: { "application/json": [".json"], "text/x-tex": [".tex", ".tikz"], "image/svg+xml": [".svg"] } },
+  {
+    description: "Drawing / TikZ / SVG / image",
+    accept: {
+      "application/json": [".json"],
+      "text/x-tex": [".tex", ".tikz"],
+      "image/svg+xml": [".svg"],
+      "image/png": [".png"],
+      "image/jpeg": [".jpg", ".jpeg"],
+      "image/webp": [".webp"],
+    },
+  },
 ];
+
+const OPEN_ACCEPT_ATTR =
+  ".json,.tex,.tikz,.svg,.png,.jpg,.jpeg,.webp,application/json,image/svg+xml,image/png,image/jpeg,image/webp";
 
 export type SaveResult = "saved" | "cancelled" | "downloaded";
 
@@ -136,19 +164,27 @@ export async function saveProjectToFile(
   return "downloaded";
 }
 
-export type OpenResult = { name: string; shapes: Shape[]; kind: OpenKind; handle?: FileSystemFileHandle };
+export type OpenResult =
+  /** A vector source that was parsed straight into shapes. */
+  | { kind: "json" | "tex" | "svg"; name: string; shapes: Shape[]; handle?: FileSystemFileHandle }
+  /** A bitmap: how to turn it into a drawing is the caller's (user's) choice. */
+  | { kind: "raster"; name: string; file: File };
 
 /**
- * Open a drawing / TikZ / SVG file from disk and parse it into shapes. A file
- * handle is returned only for native `.json` drawings (so a later Save
- * overwrites the same file); imported `.tex`/`.svg` files get no handle, so
- * saving them prompts for a new `.tikz.json` instead of clobbering the source.
+ * Open a drawing / TikZ / SVG / image file from disk. Vector sources come back
+ * parsed into shapes; a bitmap comes back as the raw `File` because it can be
+ * either placed as-is or traced, and only the user can decide which.
+ *
+ * A file handle is returned only for native `.json` drawings (so a later Save
+ * overwrites the same file); imported files get no handle, so saving them
+ * prompts for a new `.tikz.json` instead of clobbering the source.
  */
 export async function openProjectFromFile(): Promise<OpenResult | null> {
   if (supportsFS()) {
     try {
       const [handle] = await fsWindow().showOpenFilePicker!({ types: OPEN_ACCEPT_TYPES });
       const file = await handle.getFile();
+      if (isRaster(file)) return { kind: "raster", name: nameFromFile(file.name), file };
       const parsed = parse(await file.text(), file.name);
       if (!parsed) return null;
       return { ...parsed, handle: parsed.kind === "json" ? handle : undefined };
@@ -160,10 +196,12 @@ export async function openProjectFromFile(): Promise<OpenResult | null> {
   return new Promise((resolve) => {
     const input = document.createElement("input");
     input.type = "file";
-    input.accept = ".json,.tex,.tikz,.svg,application/json,image/svg+xml";
+    input.accept = OPEN_ACCEPT_ATTR;
     input.onchange = async () => {
       const file = input.files?.[0];
-      resolve(file ? parse(await file.text(), file.name) : null);
+      if (!file) return resolve(null);
+      if (isRaster(file)) return resolve({ kind: "raster", name: nameFromFile(file.name), file });
+      resolve(parse(await file.text(), file.name));
     };
     input.click();
   });

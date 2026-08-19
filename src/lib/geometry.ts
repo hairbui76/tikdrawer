@@ -1,9 +1,17 @@
-import type { Attach, ConnectorShape, Point, Shape, Side } from "./types";
+import { labelHalfSize } from "./text";
+import type { Attach, ConnectorShape, NodeShape, Point, Shape, Side } from "./types";
 
 const mid = (a: Point, b: Point): Point => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
 
-/** Approximate half-size of a text node's clickable / anchor box (px). */
-const NODE_HALF = { w: 24, h: 12 };
+/**
+ * Half-size of a text node's clickable / anchor box (px). Measured from the
+ * label itself: a fixed 24×12 box meant a 25pt heading was unclickable past its
+ * first two characters, while a tiny label grabbed clicks far away from it.
+ */
+const nodeHalf = (s: NodeShape): { w: number; h: number } => {
+  const { hw, hh } = labelHalfSize(s.text, s.style);
+  return { w: hw, h: hh };
+};
 
 /** A shape's rotation in degrees (0 if not rotatable / unset). */
 export function rotationOf(s: Shape): number {
@@ -39,8 +47,10 @@ function halfExtents(s: Shape): { hw: number; hh: number } | null {
     case "cylinder":
     case "image":
       return { hw: Math.abs(s.p2.x - s.p1.x) / 2, hh: Math.abs(s.p2.y - s.p1.y) / 2 };
-    case "node":
-      return { hw: NODE_HALF.w, hh: NODE_HALF.h };
+    case "node": {
+      const h = nodeHalf(s);
+      return { hw: h.w, hh: h.h };
+    }
     case "circle":
       return { hw: s.r, hh: s.r };
     case "ellipse":
@@ -454,8 +464,10 @@ export function shapeContains(s: Shape, pt: Point): boolean {
       const ny = (p.y - s.center.y) / s.ry;
       return nx * nx + ny * ny <= 1;
     }
-    case "node":
-      return Math.abs(p.x - s.at.x) <= NODE_HALF.w && Math.abs(p.y - s.at.y) <= NODE_HALF.h;
+    case "node": {
+      const h = nodeHalf(s);
+      return Math.abs(p.x - s.at.x) <= h.w && Math.abs(p.y - s.at.y) <= h.h;
+    }
     case "polygon": {
       if (s.points.length < 2) return false;
       const b = pointsBBox(s.points);

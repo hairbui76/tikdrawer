@@ -6,6 +6,216 @@ A running log of decisions, changes, and gotchas for the **TikDrawer** project.
 
 ---
 
+## 2026-08-19 — Adjustable label size (`Style.fontSize`) + measured text metrics
+
+Follow-up to the SVG import fixes: labels all rendered at one hard-coded size,
+so imported headings and table cells collapsed together. Asked for, with "text
+proportions should be decent".
+
+- **`Style.fontSize?: number`** — label size in **pt**, deliberately the same
+  unit as `lineWidth` because both become TikZ dimensions (geometry stays px).
+  Optional, and **absent from `DEFAULT_STYLE`**: that keeps drawings saved before
+  today valid, keeps their JSON unchanged, and avoids a `types.ts` → `text.ts`
+  circular import. `fontPtOf` supplies `DEFAULT_FONT_PT`.
+- **`DEFAULT_FONT_PT = 11.4`** — picked so it renders at the 16 canvas px the app
+  used before, i.e. existing drawings look identical.
+- **`src/lib/text.ts` (new)** — the one place that knows about label metrics:
+  `fontPtOf` / `fontPxOf`, `textWidthPx`, `labelHalfSize`, `CANVAS_FONT_FAMILY`.
+  - **Must stay server-safe**: the render API pulls in generateTikz → geometry →
+    text.ts, so the DOM is only touched lazily inside `textWidthPx` (cached
+    `getContext("2d")`, `null` when unavailable) and never at module load.
+    Verified by POSTing to `/api/render` on a running dev server.
+  - `textWidthPx` measures with the **real font** when a canvas exists and falls
+    back to 0.5em/char otherwise. Measuring is what makes the importer's
+    anchor→centre conversion land correctly; the per-character guess drifts badly
+    on all-narrow ("illli") or all-wide ("WWW") text. The fallback is the path
+    jsdom tests exercise, so both branches stay covered.
+- **Threaded through**: `generateTikz` (`font=\fontsize{pt}{1.2pt}\selectfont`),
+  `CanvasStage` (two hard-coded `fontSize={16}` sites + the node bbox),
+  `PropertiesPanel` ("Text size" in pt, shown for every TEXTABLE kind),
+  `transformShape` (scales with the drawing, like `lineWidth`), and `importSvg`
+  (`pxToPt(sourceSize × ctmScale)`).
+- **`font=` is now always emitted.** Previously the canvas drew ~16 px text while
+  LaTeX used the document's 10pt, so the preview never quite matched the editor.
+  Costs some verbosity in the generated TikZ; buys WYSIWYG.
+- **`importTikz` learned `font=`** (`\fontsize{…}` → pt), otherwise a `.tex`
+  export/re-import silently reset every label to the default. Relative size
+  commands (`\large`, `\small`) carry no absolute value and are ignored on
+  purpose rather than guessed at.
+- **Node hit box is no longer a fixed 24×12** — `NODE_HALF` became
+  `nodeHalf(s)`, derived from the measured label. The old constant meant a large
+  heading was unclickable past its first couple of characters while a tiny label
+  grabbed clicks from far away; the selection rectangle now hugs the text too.
+- **Result on the sample**: five distinct label sizes (8.0 / 6.4 / 5.44 / 5.12 /
+  4.8 pt) instead of one, with the source's ratios intact (25/15 px = 8/4.8 pt),
+  so the table cells fit their columns and headings read as headings.
+  - Sizes look small in absolute pt only because the 1600×900 artwork is scaled
+    to 0.45 to fit the canvas — that is the same factor the geometry gets.
+  - The one still-tight cell ("10.0.0.1" next to "51514") **overlaps in the
+    original SVG too** — 52 px columns holding ~55 px of 15 px Arial. Faithful,
+    not a bug.
+- `sizeOf()` returning `null` for `node` is intentional (nodes are not
+  box-resizable) and unrelated to label metrics — noted because it looks like a
+  gap when writing tests against it.
+- **Verified**: **130 checks across four suites, all passing** — 26 new font
+  checks (fallback defaults, px→pt per label, CTM scaling, fit scaling, TikZ
+  emission, `.tex` round-trip incl. `\large` being ignored, metric fallback,
+  hit-box growth and both hit-test directions) plus the existing 36 raster / 44
+  SVG / 24 escaping checks. The sample compiles end-to-end through `pdflatex` +
+  `dvisvgm` with all five sizes present, `/api/render` returns a valid SVG for a
+  sized+escaped node, and `tsc --noEmit` + `next build` are clean.
+
+---
+
+## 2026-08-19 — Fix SVG import: stroke weight, curves, stylesheets, text anchors
+
+Reported against `samples/structured_traffic_pipeline.svg` (1600×900, icon- and
+text-heavy): after importing, "the strokes look extremely ugly and thick". Five
+real defects, four in the importer and one that blocked rendering outright.
+
+- **1. Stroke width was never converted or scaled** — the headline bug, two
+  compounding mistakes:
+  - `styleOf` assigned the SVG `stroke-width` (user units, i.e. px) straight to
+    `style.lineWidth`, which is **TeX pt**. 1 px is only ~0.71 pt, so every
+    stroke was ~1.4× too heavy before anything else happened.
+  - `fitIntoCanvas` → `transformShape` scaled geometry (`r`, `rx`, `ry`, every
+    point) but **left `style.lineWidth` untouched**. Fitting 1600×900 into the
+    canvas uses scale 0.45, so a 4 px outline stayed 4 pt while the icon it
+    traced shrank by more than half.
+  - Combined: 4 px came out as **4 pt instead of 1.28 pt — 3.1× too thick**, and
+    ~20 px icons filled in solid. Fixed with `pxToPt`/`ptToPx` in `coords.ts`
+    plus lineWidth scaling in `transformShape` (also benefits `.tex` import).
+- **2. Bézier curves were thrown away** — `parsePath` skipped the control points
+  and kept only each segment's endpoint, so a shield became a pentagon. Rewrote
+  the path parser: `pathScanner` reads numbers on demand and curves are
+  *flattened* (`flattenCubic`/`flattenQuad`/`flattenArc`, ~1 segment per 4 user
+  units, 3..48 per curve). `A` now works too, via the spec's endpoint→centre
+  parameterisation (F.6.5) — including under-sized radii, which get scaled up.
+  - **Why on-demand scanning**: minified arcs pack their flags without
+    separators (`a5 5 0 0110 10`). A tokenise-everything-first pass reads `0110`
+    as one number; only a reader that knows it wants a single 0-or-1 splits it.
+  - `S`/`T` now reflect the previous control point instead of being treated as
+    plain lineto.
+- **3. `<style>` blocks were ignored entirely** — this file (like most exporter
+  output) styles by class, so text came out in the default blue instead of
+  `#111`. Added a small CSS resolver: flat `tag` / `.class` / `#id` selectors,
+  comma lists, later rule wins. Precedence per element is inline `style` → sheet
+  rule → presentation attribute, then inherit from the parent.
+- **4. `text-anchor` / baseline were ignored** — SVG starts text to the *right*
+  of `x` and anchors it on the baseline; our node centres on its point. Labels
+  were therefore pulled half their width left, on top of the icons they
+  described. Now offset by anchor and by ~0.36em vertically (skipped when
+  `dominant-baseline` is middle/central). Text width is **estimated** at
+  0.5em/char — no metrics exist at import time.
+  - **Gotcha (found via a wrong bbox)**: the `font:` shorthand's size is the
+    number *with a unit*. Matching the first number read `font:700 25px Arial`
+    as **700px**, inflating offsets 28× and pushing text to x=3392 in a
+    1600-wide document. `cssLength` now requires the unit in the shorthand and
+    clamps to 1..400px.
+- **5. Label text was never escaped for LaTeX** (pre-existing, in
+  `generateTikz`) — a single `&` in "Observation &" aborts the compile with
+  *Misplaced alignment tab character*, so **nothing rendered at all**. Added
+  `escapeTexText`, applied at both node-emitting sites.
+  - Balanced `$…$` spans pass through unescaped so labels can still hold real
+    math (`$x^2$`, `$lpha$`); an unpaired `$` is escaped like anything else.
+  - `importTikz` gained the inverse `unescapeTexText` so generate → re-import
+    still round-trips to the text the user typed.
+  - **This exposed another pre-existing bug**: `nodeToShape` grabbed its label
+    with `lastIndexOf("{")`, which mangles any label containing a brace —
+    `{\{ "a":1 \}}` came back as `"a":1 }` and `\textasciitilde{}` swallowed
+    everything before its `{}`. Replaced with `braceBody`, a balanced scan that
+    honours escaped braces; `tokenizePath`'s brace token now allows one level of
+    nesting for the same reason.
+- **⚠️ Existing imports stay wrong** — bad widths/geometry are baked into saved
+  shapes. **Re-open the SVG** to get a corrected drawing.
+- **Known limitation, now the main remaining gap**: `Style` has no font size, so
+  every label renders at the canvas's fixed 16 px and TikZ's default size. In
+  this sample the 15 px table cells therefore overlap ("src\_ipsportdport"),
+  while the 25 px titles are undersized. Fixing it means adding `fontSize` to
+  `Style` and threading it through `generateTikz` (`font=ontsize{..}{..}
+  \selectfont`), `CanvasStage` (two hard-coded `fontSize={16}`),
+  `PropertiesPanel`, and `transformShape` (must scale with the drawing) — a data
+  model change affecting every drawing, not just imports, so it was left for an
+  explicit decision.
+- Also unresolved by design: no gradients, patterns, clip paths, `<use>`,
+  `<image>`, `<tspan>` (only the concatenated text), or per-glyph positioning.
+- **Verified**: three suites, **104 checks, all passing** — 44 new SVG-import
+  checks (px→pt, fit scaling, cubic/quadratic/arc flattening with computed
+  apexes, packed arc flags, largeArc/sweep sign logic, CSS class + tag
+  selectors, `font:` shorthand, all three anchors, baseline, plus regressions
+  for the 2026-07-02 text-fill fix, transforms and primitives), 24 escaping /
+  round-trip checks, and the 36 raster-trace checks still green. The sample now
+  imports to 194 shapes with 4 px strokes at 1.28 pt and compiles end-to-end
+  through `pdflatex` + `dvisvgm` (it failed outright before). `tsc --noEmit` and
+  `next build` clean.
+  - **A robustness test earned its keep**: `d="zzz 1 2 3"` hung the new parser
+    and killed the process with an out-of-memory error. `Z` takes no arguments,
+    so it can't repeat — the loop re-ran it forever without consuming a number.
+    Fixed by clearing `cmd` after `Z`.
+
+---
+
+## 2026-08-19 — Open PNG / JPG / WebP: place as image, or trace into shapes
+
+- **Ask**: "SVG can be opened as editable shapes — can PNG/JPG do the same?"
+  Answer: not directly. SVG import works because SVG *is* geometry; a bitmap is
+  a pixel grid with nothing to read. So two paths were added, and the user picks
+  per file.
+- **`src/lib/importRaster.ts` (new)** — vectoriser. Pipeline: median-cut colour
+  quantisation (4-bit histogram, ≤4096 buckets) → 4-connected region labelling →
+  **crack following** on the pixel-corner lattice (exact staircase outline, no
+  diagonal shortcuts) → Douglas-Peucker → one closed `polygon` shape per region.
+  - `traceRgba(data, w, h, opts, target)` is **pure** (no DOM) and unit-testable;
+    `traceImage(dataUrl, opts)` adds `<img>`+canvas decoding at a 400px working
+    size.
+  - **Holes without even-odd fills**: shapes are emitted **largest area first**.
+    The white counter inside an "O" is its own region of the background colour
+    and, being smaller, is painted *after* the ring — works on canvas AND in the
+    generated TikZ because both draw in array order. Verified in the compiled
+    SVG: fills come out navy → orange → teal → **#fff (the hole)** → navy.
+  - Options: `colors` (2..16), `detail` (0..1 → DP epsilon 0.5..6), `minArea`
+    (speckle cutoff), `dropBackground` (drops the border-touching region whose
+    colour dominates the border pixels).
+  - **Gotcha (fixed during development)**: median cut degenerated when the
+    weighted median fell in the last bucket — the right half came out empty and
+    the split loop broke early, leaving a 1-colour palette and **zero** traced
+    shapes. `cut` is now clamped to `keys.length - 2`.
+  - **Gotcha (fixed)**: a single global DP epsilon erased small regions at low
+    detail. Epsilon is now also capped per region at `0.25 × min(bbox w,h)`.
+  - Caps so a photo can't produce an unusable doc: 400 shapes, 500 vertices per
+    shape, both reported via `dropped` / `vertices`.
+- **`src/lib/files.ts`** — `openProjectFromFile` now accepts `.png/.jpg/.jpeg/
+  .webp`. Bitmaps come back as `{ kind: "raster", name, file }` — **undecided**,
+  because place-vs-trace is a user choice, not something the parser can infer.
+  `OpenResult` is now a discriminated union. Raster detection matches the
+  **filename first**: `image/svg+xml` also starts with `image/` and must stay on
+  the vector path.
+- **`src/components/OpenImageDialog.tsx` (new)** — place-or-trace chooser with a
+  **live trace preview** beside the original (debounced 150 ms, stale runs
+  discarded via a run counter). Shows shape/point counts, the detected palette,
+  and warns when nothing was found or the geometry is heavy (>4000 points).
+  Reused by the Image Library's **⤳** button to trace an already-uploaded asset
+  into the current drawing.
+- **`src/lib/images.ts`** — extracted `imageShapeFor(asset, maxDim, at)` (the
+  store's `insertImageShape` now reuses it instead of duplicating the maths) plus
+  `FILL_CANVAS_DIM` for "open as its own drawing".
+- **Unchanged on purpose**: dropping an image on the canvas still places it
+  straight away — that fast path predates this and the ⤳ button covers tracing.
+- **Known limits**: anti-aliased edges become thin blended-colour slivers once
+  `colors` is raised (visible at 6+); `minArea` is the remedy, and the default
+  of 4 colours / 16px is clean. Photos are colour blobs by nature — the dialog
+  says so and steers to "Place as image".
+- **Verified**: 36/36 unit tests on `traceRgba` (exact corner rings for square /
+  L-shape / ring+hole, 4-connectivity, transparency, minArea, detail, caps,
+  placement); a synthetic 480×360 logo downscaled to 400×300 (anti-aliased)
+  traced to 5 shapes / 39 points in ~25 ms with correct palette and hole, then
+  compiled end-to-end through `pdflatex` + `dvisvgm --pdf --no-fonts`. `tsc
+  --noEmit` and `next build` clean; dev server serves the page with no errors.
+  Browser-driven UI testing wasn't possible (both entry points need a native
+  file picker, and the Browser MCP extension was not connected).
+
+---
+
 ## 2026-07-02 — Fix: SVG-imported text became solid boxes ("ô đen") in preview
 
 - **Bug**: after importing an SVG, every text node rendered as a **solid filled

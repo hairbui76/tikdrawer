@@ -1,6 +1,7 @@
 import { create } from "zustand";
-import { CANVAS_H, CANVAS_W, type Unit } from "./coords";
-import { DEFAULT_STYLE, type ImageAsset, type Point, type Shape, type Style, type TikzDoc, type Tool } from "./types";
+import { type Unit } from "./coords";
+import { imageShapeFor } from "./images";
+import { type ImageAsset, type Point, type Shape, type Style, type TikzDoc, type Tool } from "./types";
 
 export type Project = {
   id: string;
@@ -392,20 +393,7 @@ export const useStore = create<State>((set) => ({
 
   insertImageShape: (asset, at) =>
     set((st) => {
-      const maxDim = 240;
-      const scale = Math.min(1, maxDim / Math.max(asset.w, asset.h || 1));
-      const w = asset.w * scale || 120;
-      const h = asset.h * scale || 120;
-      const cx = at?.x ?? CANVAS_W / 2;
-      const cy = at?.y ?? CANVAS_H / 2;
-      const shape: Shape = {
-        id: uid(),
-        kind: "image",
-        imageId: asset.id,
-        p1: { x: cx - w / 2, y: cy - h / 2 },
-        p2: { x: cx + w / 2, y: cy + h / 2 },
-        style: { ...DEFAULT_STYLE },
-      };
+      const shape: Shape = imageShapeFor(asset, 240, at);
       return {
         past: pushPast(st),
         future: [],

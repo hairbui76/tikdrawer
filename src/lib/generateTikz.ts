@@ -1,6 +1,7 @@
 import { fmtUnit, lenToCm, pxToCmX, pxToCmY, round, type Unit } from "./coords";
 import { connectorPoints, shapeCenter, smoothControls } from "./geometry";
 import { imageFileName } from "./images";
+import { fontPtOf } from "./text";
 import type { ImageAsset, Point, Shape, Style } from "./types";
 
 function hexToRgb(hex: string): { r: number; g: number; b: number } {
@@ -17,6 +18,49 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } {
 function tikzColor(hex: string): string {
   const { r, g, b } = hexToRgb(hex);
   return `{rgb,255:red,${r};green,${g};blue,${b}}`;
+}
+
+const TEX_SPECIALS: Record<string, string> = {
+  "\\": "\\textbackslash{}",
+  "&": "\\&",
+  "%": "\\%",
+  $: "\\$",
+  "#": "\\#",
+  _: "\\_",
+  "{": "\\{",
+  "}": "\\}",
+  "~": "\\textasciitilde{}",
+  "^": "\\textasciicircum{}",
+};
+
+/**
+ * `font=…` for a label, always emitted so the PDF matches the canvas. Without
+ * it LaTeX uses the document's 10pt while the canvas draws ~11.4pt, so the
+ * preview never quite agreed with the editor. Baseline skip follows the usual
+ * 1.2× convention.
+ */
+function fontOpt(style: Style): string {
+  const pt = round(fontPtOf(style));
+  return `, font=\\fontsize{${pt}}{${round(pt * 1.2)}}\\selectfont`;
+}
+
+/**
+ * Make label text safe to drop into a tikzpicture. Unescaped text is a hard
+ * failure, not a cosmetic one: a single `&` in a label ("Observation &") aborts
+ * the whole compile with "Misplaced alignment tab character", so nothing renders
+ * at all — which is what happened to text-heavy imported SVGs.
+ *
+ * Balanced `$…$` spans are passed through untouched so a label can still hold
+ * real math (`$x^2$`, `$\alpha$`); an unpaired `$` is escaped like any other
+ * special character.
+ */
+export function escapeTexText(text: string): string {
+  const escape = (s: string): string => s.replace(/[\\&%$#_{}~^]/g, (c) => TEX_SPECIALS[c]);
+  const parts = text.split("$");
+  // An odd number of parts means the `$`s pair up; the odd-indexed pieces are
+  // then the math spans. Otherwise there is a stray `$` and nothing is math.
+  if (parts.length % 2 === 0) return escape(text);
+  return parts.map((part, i) => (i % 2 === 1 ? `$${part}$` : escape(part))).join("");
 }
 
 function styleOpts(style: Style, opts: { arrow?: boolean } = {}): string {
@@ -60,7 +104,7 @@ export function shapeToTikz(
         s.style.fill !== "none"
           ? `, fill=${tikzColor(s.style.fill)}, draw=${tikzColor(s.style.stroke)}`
           : "";
-      return `\\node[text=${tikzColor(s.style.stroke)}${fillOpt}${rotNode(s.rotation)}] at ${coord(s.at.x, s.at.y, u)} {${s.text}};`;
+      return `\\node[text=${tikzColor(s.style.stroke)}${fillOpt}${rotNode(s.rotation)}${fontOpt(s.style)}] at ${coord(s.at.x, s.at.y, u)} {${escapeTexText(s.text)}};`;
     }
     case "connector": {
       const pts = connectorPoints(s, byId);
@@ -125,7 +169,7 @@ function labelOf(s: Shape, u: Unit): string {
   if (!text) return "";
   const c = shapeCenter(s);
   const rotation = (s as { rotation?: number }).rotation;
-  return `\n  \\node[text=${tikzColor(s.style.stroke)}${rotNode(rotation)}] at ${coord(c.x, c.y, u)} {${text}};`;
+  return `\n  \\node[text=${tikzColor(s.style.stroke)}${rotNode(rotation)}${fontOpt(s.style)}] at ${coord(c.x, c.y, u)} {${escapeTexText(text)}};`;
 }
 
 export function generateTikz(shapes: Shape[], unit: Unit = "cm", images?: Map<string, ImageAsset>): string {

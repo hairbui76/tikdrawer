@@ -1,15 +1,20 @@
 "use client";
 
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { fileToAsset } from "@/lib/images";
 import { useStore } from "@/lib/store";
+import type { ImageAsset } from "@/lib/types";
+import { OpenImageDialog } from "./OpenImageDialog";
 
 export function ImageLibrary() {
   const images = useStore((s) => s.images);
   const addImage = useStore((s) => s.addImage);
   const deleteImage = useStore((s) => s.deleteImage);
   const insertImageShape = useStore((s) => s.insertImageShape);
+  const insertShapes = useStore((s) => s.insertShapes);
   const inputRef = useRef<HTMLInputElement>(null);
+  // The asset whose trace settings are being tuned, if any.
+  const [tracing, setTracing] = useState<ImageAsset | null>(null);
 
   async function onFiles(files: FileList | null) {
     if (!files) return;
@@ -47,7 +52,9 @@ export function ImageLibrary() {
       </div>
 
       {images.length === 0 ? (
-        <p className="px-1 text-xs text-slate-400">Upload images, then click one to place it on the canvas.</p>
+        <p className="px-1 text-xs text-slate-400">
+          Upload images, then click one to place it on the canvas — or trace it into editable shapes with ⤳.
+        </p>
       ) : (
         <div className="grid grid-cols-3 gap-1.5">
           {images.map((im) => (
@@ -66,6 +73,13 @@ export function ImageLibrary() {
                 <img src={im.dataUrl} alt={im.name} className="h-full w-full object-contain" draggable={false} />
               </button>
               <button
+                onClick={() => setTracing(im)}
+                title={`Trace ${im.name} into editable shapes`}
+                className="absolute bottom-0 left-0 hidden rounded-tr bg-slate-700 px-1 text-xs leading-tight text-white group-hover:block"
+              >
+                ⤳
+              </button>
+              <button
                 onClick={() => {
                   if (window.confirm(`Delete image "${im.name}"? Shapes using it will be removed.`)) deleteImage(im.id);
                 }}
@@ -77,6 +91,22 @@ export function ImageLibrary() {
             </div>
           ))}
         </div>
+      )}
+
+      {tracing && (
+        // The asset is already in the library, so placing it is a click away —
+        // this dialog only offers the trace.
+        <OpenImageDialog
+          name={tracing.name}
+          dataUrl={tracing.dataUrl}
+          allowPlace={false}
+          onPlace={() => setTracing(null)}
+          onTrace={(traced) => {
+            insertShapes(traced);
+            setTracing(null);
+          }}
+          onCancel={() => setTracing(null)}
+        />
       )}
     </div>
   );

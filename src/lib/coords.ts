@@ -39,6 +39,14 @@ export const cmToPxY = (cm: number): number => round(CANVAS_H - cm * PX_PER_CM);
 /** A length in cm → px (no flip). */
 export const cmToLen = (cm: number): number => round(cm * PX_PER_CM);
 
+/**
+ * Stroke widths are stored in TeX pt (they become TikZ `line width`) while all
+ * geometry is in canvas px. Importers that read widths in px must convert, or a
+ * hairline comes out as a slab: 1 px is only ~0.71 pt.
+ */
+export const pxToPt = (px: number): number => round((px * UNIT_PER_CM.pt) / PX_PER_CM);
+export const ptToPx = (pt: number): number => round((pt * PX_PER_CM) / UNIT_PER_CM.pt);
+
 export const snapToGrid = (n: number): number => Math.round(n / GRID) * GRID;
 
 export const dist = (a: Point, b: Point): number => Math.hypot(a.x - b.x, a.y - b.y);

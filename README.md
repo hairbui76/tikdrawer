@@ -13,6 +13,10 @@ running change log.
 - Live-generated TikZ code (copy, or download a compilable `.tex`).
 - Server-side LaTeX preview rendered to SVG.
 - **Multiple drawings** saved locally in the browser — switch, rename, delete.
+- **Open existing files:** `.tikz.json` drawings, `.tex`/`.tikz` (a
+  `tikzpicture`) and `.svg` are parsed into editable shapes; `.png`/`.jpg`/
+  `.webp` can be placed as a picture (`\includegraphics`) or traced into
+  editable polygons.
 
 ## Requirements (local mode)
 

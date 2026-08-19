@@ -28,6 +28,12 @@ export type Style = {
   arrow: ArrowStyle;
   /** 0..1 */
   opacity: number;
+  /**
+   * Label text size in pt (same unit as `lineWidth`, since both become TikZ
+   * dimensions). Optional: drawings saved before this existed have no value and
+   * fall back to `DEFAULT_FONT_PT` — see `fontPtOf` in `text.ts`.
+   */
+  fontSize?: number;
 };
 
 export type LineShape = { id: string; kind: "line"; p1: Point; p2: Point; style: Style };

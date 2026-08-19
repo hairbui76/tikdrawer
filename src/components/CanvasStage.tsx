@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { CANVAS_H, CANVAS_W, GRID, PX_PER_CM, UNIT_PER_CM, dist, snapToGrid } from "@/lib/coords";
 import { fileToAsset } from "@/lib/images";
+import { fontPxOf, labelHalfSize } from "@/lib/text";
 import {
   anchorOnShape,
   angleOf,
@@ -131,8 +132,11 @@ function bbox(s: Shape): { x: number; y: number; w: number; h: number } {
       return { x: s.center.x - s.r, y: s.center.y - s.r, w: s.r * 2, h: s.r * 2 };
     case "ellipse":
       return { x: s.center.x - s.rx, y: s.center.y - s.ry, w: s.rx * 2, h: s.ry * 2 };
-    case "node":
-      return { x: s.at.x - 24, y: s.at.y - 12, w: 48, h: 24 };
+    case "node": {
+      // Follow the label's real size so the selection box hugs the text.
+      const { hw, hh } = labelHalfSize(s.text, s.style);
+      return { x: s.at.x - hw, y: s.at.y - hh, w: hw * 2, h: hh * 2 };
+    }
     case "polygon": {
       if (!s.points.length) return { x: 0, y: 0, w: 0, h: 0 };
       const xs = s.points.map((p) => p.x);
@@ -253,7 +257,7 @@ function ShapeView({
           opacity={st.opacity}
           textAnchor="middle"
           dominantBaseline="middle"
-          fontSize={16}
+          fontSize={fontPxOf(st)}
         >
           {shape.text}
         </text>
@@ -284,7 +288,7 @@ function ShapeView({
         opacity={st.opacity}
         textAnchor="middle"
         dominantBaseline="middle"
-        fontSize={16}
+        fontSize={fontPxOf(st)}
         pointerEvents="none"
       >
         {text}
