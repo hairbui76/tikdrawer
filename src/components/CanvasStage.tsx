@@ -13,7 +13,7 @@ import {
   snapToGrid,
 } from "@/lib/coords";
 import { fileToAsset } from "@/lib/images";
-import { fontPxOf, labelHalfSize } from "@/lib/text";
+import { CANVAS_FONT_FAMILY, fontPxOf, labelHalfSize } from "@/lib/text";
 import {
   anchorOnShape,
   angleOf,
@@ -113,6 +113,7 @@ function ShapeView({
   hovered?: boolean;
   imageHref?: string;
 }) {
+  const zoom = useStore((s) => s.zoom);
   const st = shape.style;
   const common = {
     stroke: st.stroke,
@@ -257,12 +258,15 @@ function ShapeView({
       {selected &&
         (() => {
           const b = bbox(shape);
+          // Constant 4px gap ON SCREEN — a canvas-unit margin scales with the
+          // zoom and floats far off the shape when zoomed in.
+          const m = 4 / zoom;
           return (
             <rect
-              x={b.x - 4}
-              y={b.y - 4}
-              width={b.w + 8}
-              height={b.h + 8}
+              x={b.x - m}
+              y={b.y - m}
+              width={b.w + 2 * m}
+              height={b.h + 2 * m}
               fill="none"
               stroke="#0ea5e9"
               strokeWidth={1}
@@ -1421,8 +1425,14 @@ export function CanvasStage() {
                 const shape = shapes.find((s) => s.id === editing.id);
                 if (!shape || !TEXTABLE.has(shape.kind)) return null;
                 const c = shapeCenter(shape);
-                const w = 160;
-                const h = 30;
+                // Hug the shape and its label instead of a fixed 160×30 box,
+                // which dwarfed small shapes. Wide enough for the current text
+                // plus a few characters, never wider than the shape warrants.
+                const fontPx = fontPxOf(shape.style);
+                const b = bbox(shape);
+                const { hw } = labelHalfSize(shapeText(shape) ?? "", shape.style);
+                const w = Math.max(56, Math.min(Math.max(b.w, hw * 2) + 16, 480));
+                const h = Math.max(22, Math.round(fontPx * 1.5) + 8);
                 return (
                   <foreignObject
                     x={c.x - w / 2}
@@ -1452,7 +1462,9 @@ export function CanvasStage() {
                         textAlign: "center",
                         border: "1.5px solid #0ea5e9",
                         borderRadius: 4,
-                        font: "16px sans-serif",
+                        // Match the label's real face + size, so what you type
+                        // is what the shape will show.
+                        font: `${fontPx}px ${CANVAS_FONT_FAMILY}`,
                         outline: "none",
                         background: "white",
                         boxSizing: "border-box",

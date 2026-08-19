@@ -6,6 +6,36 @@ A running log of decisions, changes, and gotchas for the **TikDrawer** project.
 
 ---
 
+## 2026-08-19 — Text editor sizing + selection outline gap (zoom polish)
+
+User: the double-click text editor was "too big", and the dashed selection
+outline sat "too wide" around shapes.
+
+- **Inline text editor** (CanvasStage `editing` foreignObject): was a fixed
+  160×30 canvas-px box with hardcoded 16px sans-serif — dwarfed small nodes
+  and ignored the label's font. Now sized from the shape:
+  `w = clamp(max(bbox.w, textWidth) + 16, 56..480)`, `h ≈ fontPx*1.5 + 8`,
+  and `font = fontPxOf(style) + CANVAS_FONT_FAMILY` so typing previews the
+  real label. (Default 11.4pt ≈ 16.03px — near the old hardcoded value by
+  coincidence, but now follows `Style.fontSize`.)
+- **Selection outline**: margin was 4 *canvas* px (`b.x - 4`), which scales
+  with zoom — ~10px gap at 244%, ~32px at 800%. Now `4 / zoom` (ShapeView
+  reads `zoom` from the store) → constant 4 screen px; verified 4.0px at
+  100% and 244%.
+- **Headless-testing gotchas (important for future verification):**
+  - In headless Chrome the freshly-focused editor input instantly BLURS →
+    `commitEdit` closes it (and deletes an empty node), so editor tests see
+    nothing. Suppress capture-phase `blur`/`focusout` on the input, or
+    measure at mount via MutationObserver. Real browsers are unaffected.
+  - Puppeteer `click({clickCount: 2})` did NOT produce a dblclick here —
+    the browser saw detail=1. Use the manual sequence: `down(); up();
+    down({clickCount:2}); up({clickCount:2})` → dblclick fires.
+  - Measuring the foreignObject immediately after dblclick can catch a
+    mid-mount transient width; re-read after ~300ms or use the attribute.
+- Also noticed (NOT fixed, pre-existing): pressing Escape on a brand-new
+  empty node leaves an invisible empty node in the doc (only blur-commit
+  deletes empties). Harmless but could accumulate; candidate cleanup.
+
 ## 2026-08-19 — Scaling for polygons & groups, axis-locked moves, align
 
 Three user asks in one session: "cannot scale element" (traced images are
