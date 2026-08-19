@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { GRID } from "@/lib/coords";
 import { saveProjectToFile, signatureOf } from "@/lib/files";
 import { generateTikz } from "@/lib/generateTikz";
 import { fileToAsset, imageFileName } from "@/lib/images";
@@ -27,6 +28,7 @@ export function Editor() {
   const setZoom = useStore((s) => s.setZoom);
   const zoomBy = useStore((s) => s.zoomBy);
   const deleteSelected = useStore((s) => s.deleteSelected);
+  const nudgeSelected = useStore((s) => s.nudgeSelected);
   const markSaved = useStore((s) => s.markSaved);
   const templates = useStore((s) => s.templates);
   const setTemplates = useStore((s) => s.setTemplates);
@@ -103,6 +105,18 @@ export function Editor() {
         deleteSelected();
         return;
       }
+      // Arrow keys nudge the selection: 1px per press (the finest model
+      // unit), or one grid cell with Shift. Without a selection the arrows
+      // keep their native meaning (scrolling the canvas).
+      if (key.startsWith("arrow")) {
+        if (!useStore.getState().selectedIds.length) return;
+        e.preventDefault();
+        const step = e.shiftKey ? GRID : 1;
+        const [dx, dy] =
+          key === "arrowleft" ? [-step, 0] : key === "arrowright" ? [step, 0] : key === "arrowup" ? [0, -step] : [0, step];
+        nudgeSelected(dx, dy);
+        return;
+      }
       // Plain single-key tool shortcuts (V/L/R/C/E/T/X…).
       const tool = TOOL_BY_KEY[key];
       if (tool) {
@@ -112,7 +126,7 @@ export function Editor() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [undo, redo, setTool, deleteSelected, setZoom, zoomBy]);
+  }, [undo, redo, setTool, deleteSelected, nudgeSelected, setZoom, zoomBy]);
 
   // Paste: an image from the clipboard (e.g. a screenshot) → add + place it;
   // otherwise paste the internal shape clipboard (Ctrl+V after Ctrl+C).

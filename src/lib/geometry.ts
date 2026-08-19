@@ -18,6 +18,34 @@ export function rotationOf(s: Shape): number {
   return (s as { rotation?: number }).rotation ?? 0;
 }
 
+/** The patch that moves a shape by (dx, dy) canvas px. */
+export function translateShape(s: Shape, dx: number, dy: number): Partial<Shape> {
+  const mv = (p: Point) => ({ x: p.x + dx, y: p.y + dy });
+  switch (s.kind) {
+    case "line":
+    case "rect":
+    case "diamond":
+    case "roundrect":
+    case "cylinder":
+    case "image":
+      return { p1: mv(s.p1), p2: mv(s.p2) } as Partial<Shape>;
+    case "circle":
+    case "ellipse":
+      return { center: mv(s.center) } as Partial<Shape>;
+    case "node":
+      return { at: mv(s.at) } as Partial<Shape>;
+    case "polygon":
+      return { points: s.points.map(mv) } as Partial<Shape>;
+    case "connector":
+      // Free ends move; anchored ends stay attached (their point is ignored).
+      return {
+        from: { ...s.from, point: mv(s.from.point) },
+        to: { ...s.to, point: mv(s.to.point) },
+        waypoints: (s.waypoints ?? []).map(mv),
+      } as Partial<Shape>;
+  }
+}
+
 /** Rotate a point around a center by `deg` (screen coords, y-down → clockwise). */
 export function rotatePoint(p: Point, c: Point, deg: number): Point {
   if (!deg) return p;

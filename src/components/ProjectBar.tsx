@@ -263,7 +263,10 @@ export function ProjectBar() {
       </button>
 
       <span className="text-slate-300">|</span>
-      <label className="flex items-center gap-1 text-sm text-slate-600">
+      <label
+        className="flex items-center gap-1 text-sm text-slate-600"
+        title="Drags land on the 0.5cm grid. Hold Alt while dragging for pixel precision; arrow keys nudge the selection by 1px (Shift = one grid cell)."
+      >
         <input type="checkbox" checked={snap} onChange={(e) => setSnap(e.target.checked)} />
         Snap to grid
       </label>

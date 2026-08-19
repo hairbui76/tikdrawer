@@ -28,6 +28,7 @@ import {
   shapeCenter,
   sizeOf,
   svgPath,
+  translateShape,
   type PortPoint,
 } from "@/lib/geometry";
 import { useShapes, useStore } from "@/lib/store";
@@ -96,33 +97,6 @@ function isValid(s: Shape): boolean {
       return (Boolean(s.from.anchor) && Boolean(s.to.anchor)) || dist(s.from.point, s.to.point) > 6;
     case "polygon":
       return s.points.length >= 2;
-  }
-}
-
-function translate(s: Shape, dx: number, dy: number): Partial<Shape> {
-  const mv = (p: Point) => ({ x: p.x + dx, y: p.y + dy });
-  switch (s.kind) {
-    case "line":
-    case "rect":
-    case "diamond":
-    case "roundrect":
-    case "cylinder":
-    case "image":
-      return { p1: mv(s.p1), p2: mv(s.p2) } as Partial<Shape>;
-    case "circle":
-    case "ellipse":
-      return { center: mv(s.center) } as Partial<Shape>;
-    case "node":
-      return { at: mv(s.at) } as Partial<Shape>;
-    case "polygon":
-      return { points: s.points.map(mv) } as Partial<Shape>;
-    case "connector":
-      // Free ends move; anchored ends stay attached (their point is ignored).
-      return {
-        from: { ...s.from, point: mv(s.from.point) },
-        to: { ...s.to, point: mv(s.to.point) },
-        waypoints: (s.waypoints ?? []).map(mv),
-      } as Partial<Shape>;
   }
 }
 
@@ -694,9 +668,13 @@ export function CanvasStage() {
     y: Math.max(0, Math.min(CANVAS_H, p.y)),
   });
 
+  // Holding Alt bypasses grid snapping for the duration of the gesture, for
+  // pixel-precise placement without toggling the checkbox.
+  const snapWith = (e: React.PointerEvent): boolean => snap && !e.altKey;
+
   function getPoint(e: React.PointerEvent): Point {
     let { x, y } = clientToCanvas(e.clientX, e.clientY);
-    if (snap) {
+    if (snapWith(e)) {
       x = snapToGrid(x);
       y = snapToGrid(y);
     }
@@ -1143,7 +1121,7 @@ export function CanvasStage() {
           const rawDy = raw.y - drag.start.y;
           let dx = rawDx;
           let dy = rawDy;
-          if (snap) {
+          if (snapWith(e)) {
             // Quantise relative to the grabbed shape's own corner, so the
             // whole (multi-)selection moves rigidly in grid steps and lands
             // with that corner on the grid.
@@ -1152,12 +1130,12 @@ export function CanvasStage() {
             dx = snapToGrid(ref.x + rawDx) - ref.x;
             dy = snapToGrid(ref.y + rawDy) - ref.y;
           }
-          for (const o of drag.origs) updateShape(o.id, translate(o.shape, dx, dy));
+          for (const o of drag.origs) updateShape(o.id, translateShape(o.shape, dx, dy));
           break;
         }
         case "rotate": {
           let deg = (Math.atan2(raw.y - drag.center.y, raw.x - drag.center.x) * 180) / Math.PI + 90;
-          if (snap) deg = Math.round(deg / 15) * 15; // snap to 15° steps
+          if (snapWith(e)) deg = Math.round(deg / 15) * 15; // snap to 15° steps
           updateShape(drag.id, { rotation: ((deg % 360) + 360) % 360 });
           break;
         }
@@ -1171,7 +1149,7 @@ export function CanvasStage() {
           // the 8px handle slightly off-centre must not change the size).
           let mx = corner0.x + (raw.x - drag.start.x);
           let my = corner0.y + (raw.y - drag.start.y);
-          if (snap) {
+          if (snapWith(e)) {
             mx = snapToGrid(mx);
             my = snapToGrid(my);
           }

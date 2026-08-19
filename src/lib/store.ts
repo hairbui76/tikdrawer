@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { clampZoom, type Unit } from "./coords";
+import { translateShape } from "./geometry";
 import { imageShapeFor } from "./images";
 import { type ImageAsset, type Point, type Shape, type Style, type TikzDoc, type Tool } from "./types";
 
@@ -77,6 +78,8 @@ type State = {
   toggleSelect: (id: string) => void;
   selectMany: (ids: string[]) => void;
   deleteSelected: () => void;
+  /** Move every selected shape by (dx, dy) canvas px — arrow-key nudging. */
+  nudgeSelected: (dx: number, dy: number) => void;
   /** Save the current selection as a reusable symbol/template. */
   groupSelectionAsTemplate: (name: string) => void;
   /** Insert shapes into the current drawing (cloned + offset), selecting them. */
@@ -263,6 +266,22 @@ export const useStore = create<State>((set) => ({
           ),
         ),
         selectedIds: [],
+      };
+    }),
+
+  nudgeSelected: (dx, dy) =>
+    set((st) => {
+      const ids = new Set(st.selectedIds);
+      if (!ids.size) return {};
+      return {
+        // pushPast skips consecutive duplicates but not distinct nudges: each
+        // arrow press is its own undo step, capped by HISTORY_LIMIT.
+        past: pushPast(st),
+        future: [],
+        ...setShapes(
+          st,
+          currentShapes(st).map((s) => (ids.has(s.id) ? ({ ...s, ...translateShape(s, dx, dy) } as Shape) : s)),
+        ),
       };
     }),
 

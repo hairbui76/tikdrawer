@@ -6,6 +6,31 @@ A running log of decisions, changes, and gotchas for the **TikDrawer** project.
 
 ---
 
+## 2026-08-19 — Fine-grained move/resize (Alt bypass + arrow nudge)
+
+User: wants to move/scale in small units (px/pt); "it always transforms a
+lot" = the default 0.5cm grid snap quantising every drag.
+
+- **Alt held during a drag bypasses grid snap** for that gesture (move,
+  resize, rotate's 15° steps, and drawing via `getPoint`) — `snapWith(e)`
+  helper in CanvasStage reads `e.altKey` per pointer event.
+- **Arrow keys nudge the selection by 1px** (= 0.025cm ≈ 0.71pt, the finest
+  model unit); **Shift+arrow = one grid cell (20px)**. `nudgeSelected(dx,dy)`
+  store action; each press is its own undo step. Without a selection the
+  arrows keep native scrolling; handler skipped while typing.
+- `translate` moved from CanvasStage to `geometry.ts` as **`translateShape`**
+  so the store's nudge action and the canvas drag share one implementation.
+- Snap checkbox tooltip documents both (Alt + arrows).
+- Exact numeric W/H inputs already existed in PropertiesPanel (px units).
+- Verified headless Chrome, production build: Alt-drag 7,3px → exactly
+  (0.175,-0.075)cm; Alt-resize +5px → +0.125cm; arrows 3R2U → (0.075,0.05)cm;
+  Shift+→ → 0.5cm; Ctrl+Z undoes one nudge; plain snap drag still lands the
+  corner ON the grid; arrows without selection move nothing.
+- **Snap semantics note:** with snap on, a plain drag aligns the shape's bbox
+  corner TO the grid (draw.io style) — after off-grid fine adjustments, the
+  next snapped drag re-aligns it. The *delta* is deliberately not the thing
+  quantised.
+
 ## 2026-08-19 — Fix: snap teleported shapes on grab (the real "jump" bug)
 
 User: still jumping after the wheel fix; asked if it depends on "the ratio of
