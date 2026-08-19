@@ -25,6 +25,8 @@ export function ProjectBar() {
   const setShowRuler = useStore((s) => s.setShowRuler);
   const unit = useStore((s) => s.unit);
   const setUnit = useStore((s) => s.setUnit);
+  const texLayout = useStore((s) => s.texLayout);
+  const setTexLayout = useStore((s) => s.setTexLayout);
   const addImage = useStore((s) => s.addImage);
   const shapes = useShapes();
   const [tpl, setTpl] = useState("");
@@ -284,6 +286,20 @@ export function ProjectBar() {
           <option value="cm">cm</option>
           <option value="mm">mm</option>
           <option value="pt">pt</option>
+        </select>
+      </label>
+      <label
+        className="flex items-center gap-1 text-sm text-slate-600"
+        title="Where the figure goes in your paper. '1 column' wraps the TikZ in \resizebox{\columnwidth}{!}{…} so it fits one column of a two-column layout (needs graphicx, which paper templates load)."
+      >
+        Output
+        <select
+          value={texLayout}
+          onChange={(e) => setTexLayout(e.target.value as "full" | "column")}
+          className="rounded border border-slate-300 bg-white px-1 py-1 text-sm"
+        >
+          <option value="full">Full page</option>
+          <option value="column">1 column (2-col paper)</option>
         </select>
       </label>
       <button

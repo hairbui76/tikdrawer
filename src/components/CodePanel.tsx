@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { fullDocument } from "@/lib/generateTikz";
-import { useCurrentProject } from "@/lib/store";
+import { useCurrentProject, useStore } from "@/lib/store";
 
 function slugify(name: string): string {
   return (
@@ -16,6 +16,7 @@ function slugify(name: string): string {
 
 export function CodePanel({ code }: { code: string }) {
   const project = useCurrentProject();
+  const texLayout = useStore((s) => s.texLayout);
   const [copied, setCopied] = useState(false);
 
   function copy() {
@@ -26,7 +27,7 @@ export function CodePanel({ code }: { code: string }) {
   }
 
   function downloadTex() {
-    const blob = new Blob([fullDocument(code)], { type: "text/x-tex" });
+    const blob = new Blob([fullDocument(code, texLayout)], { type: "text/x-tex" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;

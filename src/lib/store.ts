@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { clampZoom, type Unit } from "./coords";
+import type { TexLayout } from "./generateTikz";
 import { translateShape } from "./geometry";
 import { imageShapeFor } from "./images";
 import { type ImageAsset, type Point, type Shape, type Style, type TikzDoc, type Tool } from "./types";
@@ -54,6 +55,8 @@ type State = {
   lockAspect: boolean;
   /** Canvas view scale (1 = 100%). Purely visual — see `clampZoom`. */
   zoom: number;
+  /** Target paper layout for the generated TikZ (full page vs one column). */
+  texLayout: TexLayout;
   /** Per-project signature of the last state saved to a file (for dirty checks). */
   savedSig: Record<string, string>;
   /** Undo/redo stacks hold snapshots of the *current* project's shapes. */
@@ -69,6 +72,7 @@ type State = {
   setShowRuler: (b: boolean) => void;
   setUnit: (u: Unit) => void;
   setLockAspect: (b: boolean) => void;
+  setTexLayout: (l: TexLayout) => void;
   /** Set the zoom to an absolute factor (clamped). */
   setZoom: (z: number) => void;
   /** Multiply the zoom by `factor` (clamped) — used by the +/- buttons. */
@@ -151,6 +155,7 @@ export const useStore = create<State>((set) => ({
   unit: "cm",
   lockAspect: false,
   zoom: 1,
+  texLayout: "full",
   savedSig: {},
   past: [],
   future: [],
@@ -162,6 +167,7 @@ export const useStore = create<State>((set) => ({
   setShowRuler: (b) => set({ showRuler: b }),
   setUnit: (u) => set({ unit: u }),
   setLockAspect: (b) => set({ lockAspect: b }),
+  setTexLayout: (l) => set({ texLayout: l }),
   setZoom: (z) => set({ zoom: clampZoom(z) }),
   zoomBy: (factor) => set((st) => ({ zoom: clampZoom(st.zoom * factor) })),
   markSaved: (projectId, signature) =>

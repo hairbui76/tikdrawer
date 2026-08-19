@@ -6,6 +6,29 @@ A running log of decisions, changes, and gotchas for the **TikDrawer** project.
 
 ---
 
+## 2026-08-19 — Output option: full page vs one column (2-col paper)
+
+User: TikZ output assumed a full-page figure; wanted an option for one
+column of a two-column paper.
+
+- New **"Output" select in ProjectBar** (next to Unit): "Full page" (raw
+  tikzpicture, as before) / "1 column (2-col paper)".
+- `TexLayout` type + `wrapForLayout` in `generateTikz.ts`: column mode wraps
+  the picture in `\resizebox{\columnwidth}{!}{%…%}` (graphicx, which every
+  paper template loads; the `%`s prevent spurious spaces). The canvas is 20cm
+  wide, so scaling is unavoidable — resizebox is the standard mechanism and
+  picks up the target template's real `\columnwidth`.
+- **Preview render stays raw** (WYSIWYG at natural size): Editor now keeps
+  `rawTikz` for the POST to /api/render and wraps only the CodePanel `code`.
+  `\columnwidth` inside the standalone preview class would be meaningless.
+- **Downloaded .tex stays compilable**: `fullDocument(code, layout)` inserts
+  `\setlength{\columnwidth}{8.5cm}` (representative: IEEE ≈ 8.9, ACM ≈ 8.45)
+  before `\begin{document}` in column mode only.
+- `texLayout` lives in the store (not persisted, like unit/snap).
+- Verified headless Chrome + tsx: full mode has no resizebox; column mode
+  wraps exactly; the render POST carries raw tikz; fullDocument places
+  setlength before begin{document} in column mode only.
+
 ## 2026-08-19 — Fine-grained move/resize (Alt bypass + arrow nudge)
 
 User: wants to move/scale in small units (px/pt); "it always transforms a

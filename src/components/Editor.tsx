@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { GRID } from "@/lib/coords";
 import { saveProjectToFile, signatureOf } from "@/lib/files";
-import { generateTikz } from "@/lib/generateTikz";
+import { generateTikz, wrapForLayout } from "@/lib/generateTikz";
 import { fileToAsset, imageFileName } from "@/lib/images";
 import { useCurrentProject, useShapes, useStore } from "@/lib/store";
 import { loadImages, loadState, saveImages, saveState } from "@/lib/storage";
@@ -44,8 +44,12 @@ export function Editor() {
   const [ready, setReady] = useState(false);
   const [render, setRender] = useState<RenderState>({ status: "idle" });
 
+  const texLayout = useStore((s) => s.texLayout);
   const imagesById = useMemo(() => new Map(images.map((im) => [im.id, im])), [images]);
-  const code = useMemo(() => generateTikz(shapes, unit, imagesById), [shapes, unit, imagesById]);
+  // The raw picture feeds the preview render (WYSIWYG at natural size); the
+  // layout wrapper only affects what the user copies into their paper.
+  const rawTikz = useMemo(() => generateTikz(shapes, unit, imagesById), [shapes, unit, imagesById]);
+  const code = useMemo(() => wrapForLayout(rawTikz, texLayout), [rawTikz, texLayout]);
 
   // Latest save closure (kept in a ref so the key handler stays stable).
   const saveRef = useRef<() => void>(() => {});
@@ -201,7 +205,7 @@ export function Editor() {
         const res = await fetch("/api/render", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ tikz: code, images: payloadImages }),
+          body: JSON.stringify({ tikz: rawTikz, images: payloadImages }),
         });
         const data = await res.json();
         if (data.ok) setRender({ status: "ok", svg: data.svg });
@@ -211,7 +215,7 @@ export function Editor() {
       }
     }, 700);
     return () => window.clearTimeout(handle);
-  }, [code, ready, shapes, images]);
+  }, [rawTikz, ready, shapes, images]);
 
   return (
     <div className="flex h-screen flex-col bg-slate-50 text-slate-800">

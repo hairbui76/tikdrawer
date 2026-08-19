@@ -178,8 +178,24 @@ export function generateTikz(shapes: Shape[], unit: Unit = "cm", images?: Map<st
   return `\\begin{tikzpicture}\n${body}\n\\end{tikzpicture}`;
 }
 
+/**
+ * Where the figure will live in the reader's paper. "full" emits the raw
+ * tikzpicture at its natural size; "column" wraps it in
+ * `\resizebox{\columnwidth}{!}{…}` so it fits one column of a two-column
+ * layout (the drawing canvas is 20cm wide — far wider than any column).
+ */
+export type TexLayout = "full" | "column";
+
+export function wrapForLayout(tikz: string, layout: TexLayout): string {
+  if (layout !== "column") return tikz;
+  // graphicx provides \resizebox — loaded by fullDocument below, and by
+  // virtually every paper template. The trailing % after \end{tikzpicture}
+  // keeps a spurious space out of the box.
+  return `\\resizebox{\\columnwidth}{!}{%\n${tikz}%\n}`;
+}
+
 /** Wrap a tikzpicture block into a compilable standalone document. */
-export function fullDocument(tikz: string): string {
+export function fullDocument(tikz: string, layout: TexLayout = "full"): string {
   return [
     "\\documentclass[tikz,border=2pt]{standalone}",
     // Unicode text support (e.g. Vietnamese "ớ", accents, symbols). Works with
@@ -196,6 +212,11 @@ export function fullDocument(tikz: string): string {
     "\\usepackage{graphicx}",
     "\\usepackage{tikz}",
     "\\usetikzlibrary{arrows.meta,calc,positioning,patterns,shapes}",
+    // standalone has no meaningful \columnwidth; give the resizebox a typical
+    // two-column paper's column (IEEE ≈ 8.9cm, ACM ≈ 8.45cm) so the download
+    // compiles and previews at a realistic size. In the real paper the wrapper
+    // picks up the template's own \columnwidth instead.
+    ...(layout === "column" ? ["\\setlength{\\columnwidth}{8.5cm} % one column of a two-column paper"] : []),
     "\\begin{document}",
     tikz,
     "\\end{document}",
