@@ -6,6 +6,19 @@ A running log of decisions, changes, and gotchas for the **TikDrawer** project.
 
 ---
 
+## 2026-08-20 — Text editor sizes to the TEXT, not the shape
+
+Follow-up correction: yesterday's editor sizing used
+`max(shape width, text width)` — the user's screenshot showed the real
+complaint: editing a short word inside a large container threw a
+container-wide input over the neighbouring shapes. **The editor now hugs
+only the text being edited** — `w = clamp(textWidth + 24, 56..480)` — and
+grows live as you type (shape.text updates per keystroke → re-render
+remeasures). Verified: empty editor on a 240px container = 56px; "packets"
+≈ 90px; a long sentence ≈ 402px. Lesson: when a user says a UI element is
+"too big", ask/check *relative to what* — the text, not the shape, was the
+reference here.
+
 ## 2026-08-19 — Text editor sizing + selection outline gap (zoom polish)
 
 User: the double-click text editor was "too big", and the dashed selection

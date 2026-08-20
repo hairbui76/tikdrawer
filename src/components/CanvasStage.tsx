@@ -1425,13 +1425,12 @@ export function CanvasStage() {
                 const shape = shapes.find((s) => s.id === editing.id);
                 if (!shape || !TEXTABLE.has(shape.kind)) return null;
                 const c = shapeCenter(shape);
-                // Hug the shape and its label instead of a fixed 160×30 box,
-                // which dwarfed small shapes. Wide enough for the current text
-                // plus a few characters, never wider than the shape warrants.
+                // Hug the TEXT being edited (it grows as you type), never the
+                // shape: editing a short word in a large container must not
+                // throw a container-wide box over the neighbours.
                 const fontPx = fontPxOf(shape.style);
-                const b = bbox(shape);
                 const { hw } = labelHalfSize(shapeText(shape) ?? "", shape.style);
-                const w = Math.max(56, Math.min(Math.max(b.w, hw * 2) + 16, 480));
+                const w = Math.max(56, Math.min(hw * 2 + 24, 480));
                 const h = Math.max(22, Math.round(fontPx * 1.5) + 8);
                 return (
                   <foreignObject
