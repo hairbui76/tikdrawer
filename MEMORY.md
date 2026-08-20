@@ -6,6 +6,31 @@ A running log of decisions, changes, and gotchas for the **TikDrawer** project.
 
 ---
 
+## 2026-08-21 — PDF export
+
+User wanted a PDF export next to the existing SVG/PNG/.tex options.
+
+- **API**: `/api/render` accepts optional `format: "pdf"` — the LaTeX run
+  already produces `main.pdf` as the dvisvgm intermediate, so the PDF branch
+  just returns it (base64 in JSON) and skips dvisvgm. The external-service
+  proxy passes the body through verbatim, so a deployed render service picks
+  the feature up with no proxy change (the *service* image must be rebuilt to
+  this commit, though).
+- **UI**: "Export PDF" button in PreviewPanel, shown once a preview has
+  rendered (if SVG compiled, PDF will too); busy state while compiling; the
+  PDF downloads as `<project-slug>.pdf`. Editor passes an `onExportPdf`
+  callback; the duplicated payload-images collection was factored into
+  `renderImages()`.
+- PDF exports at the figure's natural size (raw tikz, standalone class,
+  border=2pt) regardless of the Output/column setting — the intended use is
+  `\includegraphics[width=\columnwidth]{fig.pdf}`, where the paper scales it.
+- **Verified without local TeX** by pointing `TIKDRAWER_LATEX_ENGINE` and
+  `TIKDRAWER_DVISVGM` at fake shell scripts that write a minimal PDF/SVG —
+  exercises the full route + UI: svg format unchanged, pdf format returns
+  valid base64 (`%PDF-1.4` header), button appears after render, click
+  downloads `untitled.pdf` with a valid header (headless download via CDP
+  Page.setDownloadBehavior). Real-toolchain compile still needs a TeX host.
+
 ## 2026-08-20 — Text editor sizes to the TEXT, not the shape
 
 Follow-up correction: yesterday's editor sizing used

@@ -187,6 +187,31 @@ export function Editor() {
     saveImages(images);
   }, [ready, images]);
 
+  // Images the drawing references, in the shape the render API expects.
+  const renderImages = () => {
+    const usedIds = new Set(shapes.filter((s) => s.kind === "image").map((s) => s.imageId));
+    return images
+      .filter((im) => usedIds.has(im.id))
+      .map((im) => ({ name: imageFileName(im), dataUrl: im.dataUrl }));
+  };
+
+  // On-demand PDF export: same compile as the preview, but the server returns
+  // the PDF itself (base64). Resolves to an error message, or null on success.
+  const exportPdf = async (): Promise<{ pdf: string | null; log?: string }> => {
+    try {
+      const res = await fetch("/api/render", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ tikz: rawTikz, images: renderImages(), format: "pdf" }),
+      });
+      const data = await res.json();
+      if (data.ok && typeof data.pdf === "string") return { pdf: data.pdf };
+      return { pdf: null, log: data.log ?? "PDF export failed" };
+    } catch (e) {
+      return { pdf: null, log: e instanceof Error ? e.message : String(e) };
+    }
+  };
+
   // Debounced server-side LaTeX render.
   useEffect(() => {
     if (!ready) return;
@@ -197,15 +222,10 @@ export function Editor() {
     const handle = window.setTimeout(async () => {
       setRender({ status: "loading" });
       try {
-        // Collect images referenced by the drawing so the server can embed them.
-        const usedIds = new Set(shapes.filter((s) => s.kind === "image").map((s) => s.imageId));
-        const payloadImages = images
-          .filter((im) => usedIds.has(im.id))
-          .map((im) => ({ name: imageFileName(im), dataUrl: im.dataUrl }));
         const res = await fetch("/api/render", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ tikz: rawTikz, images: payloadImages }),
+          body: JSON.stringify({ tikz: rawTikz, images: renderImages() }),
         });
         const data = await res.json();
         if (data.ok) setRender({ status: "ok", svg: data.svg });
@@ -240,7 +260,7 @@ export function Editor() {
 
         <aside className="flex w-[28rem] flex-col border-l border-slate-200 bg-white">
           <div className="h-1/2 min-h-0 border-b border-slate-200">
-            <PreviewPanel state={render} />
+            <PreviewPanel state={render} onExportPdf={exportPdf} />
           </div>
           <div className="h-1/2 min-h-0">
             <CodePanel code={code} />

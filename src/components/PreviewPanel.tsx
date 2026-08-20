@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { useCurrentProject } from "@/lib/store";
 
 export type RenderState =
@@ -58,10 +59,34 @@ function inlineSvg(svg: string): string {
   return i > 0 ? svg.slice(i) : svg;
 }
 
-export function PreviewPanel({ state }: { state: RenderState }) {
+export function PreviewPanel({
+  state,
+  onExportPdf,
+}: {
+  state: RenderState;
+  /** Compile and return the figure as a PDF (base64), or an error log. */
+  onExportPdf?: () => Promise<{ pdf: string | null; log?: string }>;
+}) {
   const project = useCurrentProject();
   const name = slugify(project.name);
   const svg = state.status === "ok" ? state.svg : null;
+  const [pdfBusy, setPdfBusy] = useState(false);
+
+  async function exportPdf() {
+    if (!onExportPdf || pdfBusy) return;
+    setPdfBusy(true);
+    try {
+      const { pdf, log } = await onExportPdf();
+      if (pdf) {
+        const bytes = Uint8Array.from(atob(pdf), (c) => c.charCodeAt(0));
+        download(`${name}.pdf`, new Blob([bytes], { type: "application/pdf" }));
+      } else {
+        window.alert(`PDF export failed:\n${log ?? "unknown error"}`);
+      }
+    } finally {
+      setPdfBusy(false);
+    }
+  }
 
   return (
     <div className="flex h-full flex-col">
@@ -86,6 +111,16 @@ export function PreviewPanel({ state }: { state: RenderState }) {
               >
                 Export PNG
               </button>
+              {onExportPdf && (
+                <button
+                  onClick={exportPdf}
+                  disabled={pdfBusy}
+                  title="Compile the figure to a PDF (vector, ready to \includegraphics)"
+                  className="rounded border border-slate-300 px-2 py-0.5 text-xs hover:bg-slate-100 disabled:opacity-50"
+                >
+                  {pdfBusy ? "Exporting…" : "Export PDF"}
+                </button>
+              )}
             </>
           )}
         </div>

@@ -76,11 +76,15 @@ export async function POST(req: Request) {
 
   let tikz: unknown;
   let images: unknown;
+  let format: unknown;
   try {
-    ({ tikz, images } = JSON.parse(body));
+    ({ tikz, images, format } = JSON.parse(body));
   } catch {
     return NextResponse.json({ ok: false, log: "Invalid JSON body" }, { status: 400 });
   }
+  // "svg" (default) previews in the browser; "pdf" returns the compiled PDF
+  // itself (base64) — the LaTeX run already produces it as the intermediate.
+  const wantPdf = format === "pdf";
 
   if (typeof tikz !== "string" || tikz.length === 0 || tikz.length > MAX_INPUT) {
     return NextResponse.json({ ok: false, log: "Invalid or oversized TikZ input" }, { status: 400 });
@@ -133,6 +137,12 @@ export async function POST(req: Request) {
         });
       }
       return NextResponse.json({ ok: false, log: extractError(log) || err.message || "Compilation failed" });
+    }
+
+    // PDF export stops here — the compile output IS the deliverable.
+    if (wantPdf) {
+      const pdf = await readFile(join(dir, "main.pdf"));
+      return NextResponse.json({ ok: true, pdf: pdf.toString("base64") });
     }
 
     // 2) Convert PDF -> SVG. --no-fonts traces glyphs as paths so the browser
