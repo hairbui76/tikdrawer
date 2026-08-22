@@ -6,6 +6,36 @@ A running log of decisions, changes, and gotchas for the **TikDrawer** project.
 
 ---
 
+## 2026-08-22 — Trace engine: research, plan, and the palette-diversity fix
+
+User asked for a researched plan to fix tracing ("now is really bad").
+Full plan published as an artifact ("Trace Engine Plan",
+https://claude.ai/code/artifact/6a2d0d21-fc8e-46e8-b9b7-eaa087109175) with
+embedded before/after evidence.
+
+- **New fixture exposed a live bug:** a matplotlib-style chart traced with
+  BOTH curves grey — the palette cap kept the top-N entries *by coverage*,
+  and a chart's red/blue curves are chromatically vital but pixel-tiny next
+  to white bg + grey gridlines. **Fixed:** trim now drops the most
+  *redundant* entry instead (lower-coverage member of the closest remaining
+  pair, O(k³) with k ≤ 20). Chart keeps red at 4 colours, red+blue at 6;
+  side benefit: logo wordmark now proper navy with no fringe wash.
+- **Research summary** (Potrace paper; VTracer docs; ImageTracer.js
+  process_overview; skeleton-tracing/centerline literature): our remaining
+  structural gaps vs production tracers are exactly (1) no curve primitive
+  in output — they all fit Béziers/splines with a corner threshold
+  (~60°); (2) no centerline mode — thin strokes trace as double-outline
+  slivers in ALL outline tracers; skeletonisation (Zhang–Suen) is the fix.
+  Everything else (stacked colour layers, depth-ordered holes, speckle
+  filtering) we already match.
+- **Planned phases** (see artifact for acceptance criteria): 1) `rounded`
+  flag on PolygonShape + smooth rendering in canvas SVG & TikZ `.. controls
+  ..` (reuse connector smoothing) — fewer points, real curves; 2) centerline
+  stroke extraction (width test → Zhang–Suen thinning → polyline graph →
+  open polylines with measured lineWidth); 3) two-pass confident/ambiguous
+  AA pixel assignment; 4) Web Worker + vitest fixture suite (engine has
+  silently regressed 3× for lack of tests) + text-heavy-image guidance.
+
 ## 2026-08-22 — Trace working resolution scales with the Detail slider
 
 User traced a dense 914×646 infographic (lots of tiny text) — still bad.

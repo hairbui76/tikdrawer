@@ -421,13 +421,28 @@ export function traceRgba(
   target: Target = fitTarget(w, h),
 ): TraceResult {
   const colors = Math.max(2, Math.min(16, Math.round(opts.colors)));
-  // Over-split, merge near-duplicates, then keep the top `colors`: without the
-  // head-room, median cut wastes splits on anti-aliasing shades that merge
-  // right back, and genuinely distinct colours (a red bar, a border blue)
-  // never get their own entry — they averaged into mud.
-  const palette = mergeClose(medianCut(histogram(data), colors + 4), 32)
-    .slice(0, colors)
-    .map((e) => e.color);
+  // Over-split, merge near-duplicates: without the head-room, median cut
+  // wastes splits on anti-aliasing shades that merge right back, and
+  // genuinely distinct colours (a red bar, a border blue) never get their
+  // own entry — they averaged into mud.
+  const entries = mergeClose(medianCut(histogram(data), colors + 4), 32);
+  // Trim to the requested count by dropping the most REDUNDANT entry — the
+  // lower-coverage member of the closest remaining pair — never merely the
+  // smallest. Keeping top-N by coverage erased a chart's red/blue curves:
+  // chromatically vital, but a tiny fraction of the pixels next to white
+  // background and grey gridlines.
+  while (entries.length > colors) {
+    let bi = 0, bj = 1, best = Infinity;
+    for (let i = 0; i < entries.length; i++) {
+      for (let j = i + 1; j < entries.length; j++) {
+        const a = entries[i].color, b = entries[j].color;
+        const d = (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2;
+        if (d < best) { best = d; bi = i; bj = j; }
+      }
+    }
+    entries.splice(entries[bi].count >= entries[bj].count ? bj : bi, 1);
+  }
+  const palette = entries.map((e) => e.color);
   if (!palette.length) return { shapes: [], regions: 0, dropped: 0, vertices: 0, palette: [] };
 
   // Snap every pixel to its nearest palette entry (-1 = transparent).
