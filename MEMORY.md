@@ -6,6 +6,43 @@ A running log of decisions, changes, and gotchas for the **TikDrawer** project.
 
 ---
 
+## 2026-08-22 — Raster trace: holes, palette, curve smoothness (visual pass)
+
+User: "the image trace works really bad, have you checked it?" — honest
+answer: the first overhaul was verified on SYNTHETIC patterns only. This
+pass generated realistic images with PIL (logo, flowchart screenshot,
+transparent icon), traced them through the real dialog in headless Chrome,
+and READ the screenshots. Three fundamental defects were visible:
+
+- **Holes/nesting broken (worst):** contours are outer-only and paint order
+  was "largest area first". A flowchart box's thin border ring has LESS area
+  than the fill it encloses → the ring's solid polygon painted OVER the fill
+  and text (boxes became dark slabs). A TRANSPARENT hole (icon's triangle)
+  had no region at all and vanished under the shape around it.
+  **Fix:** (a) label transparent runs as regions too; enclosed transparent
+  regions become WHITE shapes (canvas and paper are white → reads as a
+  cut-out), border-touching ones are the outside world; (b) paint by
+  **containment depth**, not area — parent = region of the pixel above a
+  region's topmost-leftmost pixel; the chain is strictly upward so it
+  terminates, and an enclosed region is always deeper than its enclosure.
+  Sort keep by (depth asc, area desc).
+- **Palette collapse:** median cut wasted splits on near-white AA shades
+  that `mergeClose` folded back, so real colours averaged into mud (red bar
+  → maroon; border blue + slate text → one grey). **Fix:** over-split
+  (`colors + 4`), merge, then cap to the top `colors` by coverage.
+- **Lumpy curves:** DP leaves visible chords on circles. **Fix:**
+  `roundCorners` — 2 passes of angle-aware Chaikin AFTER simplification:
+  vertices turning < 62° get corner-cut (25% of each edge, capped 4 work px);
+  sharper corners stay exact. Diamond regression still traces to exactly 4
+  vertices at 45°; the noisy disc's radius deviation improved ±12.3 → ±4.6px.
+
+Verified visually (screenshots in scratchpad): flowchart now has fills +
+borders + readable labels + arrows; logo circle smooth, red bar red; icon
+hole preserved with smooth lobes. Perf unchanged (227ms, 512² photo-like).
+**Method lesson recorded:** for image-processing features, generate
+realistic fixtures and LOOK at the output (screenshot → Read); synthetic
+asserts alone missed all three of these.
+
 ## 2026-08-21 — PDF export
 
 User wanted a PDF export next to the existing SVG/PNG/.tex options.

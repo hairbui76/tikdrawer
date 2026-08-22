@@ -12,10 +12,11 @@
 //   4. smooth the staircase (edge midpoints) and simplify with Douglas-Peucker,
 //   5. emit one closed `polygon` shape per region, largest first.
 //
-// Step 5's ordering is what makes holes work without even-odd fills: the white
-// counter inside an "O" is its own region of the background colour, and being
-// smaller it is painted *after* (on top of) the black ring — both on canvas and
-// in the generated TikZ, which draw in array order.
+// Step 5 paints by CONTAINMENT DEPTH (shallow enclosures first), which is what
+// makes holes and nested content work without even-odd fills: a ring's traced
+// outline is a solid polygon, so whatever it encloses — the white counter of an
+// "O", a box's fill and label — must be painted after it, regardless of area.
+// Enclosed transparent areas become white shapes for the same reason.
 //
 // Good on line art, logos, icons and diagrams. A photograph has no flat regions
 // to find, so it degrades into a few hundred colour blobs — usable as a poster
@@ -343,6 +344,43 @@ function simplifyRing(ring: Point[], eps: number): Point[] {
   return open;
 }
 
+/**
+ * Round GENTLE corners (they approximate curves) while keeping sharp ones
+ * (real corners). One pass Chaikin-cuts each gentle vertex into two points a
+ * quarter of the way along its edges, capped at 4 work px so long straight
+ * edges keep their line; two passes turn DP's visible chords on a circle into
+ * a smooth outline. Rectangle corners (90°) stay untouched.
+ */
+function roundCorners(ring: Point[], iterations: number): Point[] {
+  const SHARP = (62 * Math.PI) / 180;
+  const STRAIGHT = 0.03;
+  const MAX_CUT = 4;
+  for (let it = 0; it < iterations; it++) {
+    const n = ring.length;
+    if (n < 4) return ring;
+    const out: Point[] = [];
+    for (let i = 0; i < n; i++) {
+      const p = ring[(i - 1 + n) % n];
+      const c = ring[i];
+      const q = ring[(i + 1) % n];
+      let turn = Math.abs(Math.atan2(q.y - c.y, q.x - c.x) - Math.atan2(c.y - p.y, c.x - p.x));
+      if (turn > Math.PI) turn = 2 * Math.PI - turn;
+      if (turn < STRAIGHT || turn >= SHARP) {
+        out.push(c);
+        continue;
+      }
+      const l1 = Math.hypot(c.x - p.x, c.y - p.y);
+      const l2 = Math.hypot(q.x - c.x, q.y - c.y);
+      const t1 = Math.min(0.25, MAX_CUT / (l1 || 1));
+      const t2 = Math.min(0.25, MAX_CUT / (l2 || 1));
+      out.push({ x: c.x - (c.x - p.x) * t1, y: c.y - (c.y - p.y) * t1 });
+      out.push({ x: c.x + (q.x - c.x) * t2, y: c.y + (q.y - c.y) * t2 });
+    }
+    ring = out;
+  }
+  return ring;
+}
+
 /** Evenly thin an over-long ring down to `max` vertices, keeping its shape. */
 function capVertices(ring: Point[], max: number): Point[] {
   if (ring.length <= max) return ring;
@@ -376,7 +414,13 @@ export function traceRgba(
   target: Target = fitTarget(w, h),
 ): TraceResult {
   const colors = Math.max(2, Math.min(16, Math.round(opts.colors)));
-  const palette = mergeClose(medianCut(histogram(data), colors), 32).map((e) => e.color);
+  // Over-split, merge near-duplicates, then keep the top `colors`: without the
+  // head-room, median cut wastes splits on anti-aliasing shades that merge
+  // right back, and genuinely distinct colours (a red bar, a border blue)
+  // never get their own entry — they averaged into mud.
+  const palette = mergeClose(medianCut(histogram(data), colors + 4), 32)
+    .slice(0, colors)
+    .map((e) => e.color);
   if (!palette.length) return { shapes: [], regions: 0, dropped: 0, vertices: 0, palette: [] };
 
   // Snap every pixel to its nearest palette entry (-1 = transparent).
@@ -412,7 +456,10 @@ export function traceRgba(
   }
 
   // Label 4-connected regions (iterative flood fill — deep recursion would blow
-  // the stack on a large uniform area).
+  // the stack on a large uniform area). Transparent runs are labelled too
+  // (color -1): an ENCLOSED transparent area is a hole in the artwork, and
+  // without a region of its own it would silently vanish under the shape that
+  // surrounds it.
   const labels = new Int32Array(w * h).fill(-1);
   type Region = {
     label: number; color: number; area: number; sx: number; sy: number; border: boolean;
@@ -421,7 +468,7 @@ export function traceRgba(
   const regions: Region[] = [];
   const stack: number[] = [];
   for (let start = 0; start < w * h; start++) {
-    if (labels[start] !== -1 || idx[start] < 0) continue;
+    if (labels[start] !== -1) continue;
     const color = idx[start];
     const label = regions.length;
     const sx0 = start % w, sy0 = (start / w) | 0;
@@ -448,12 +495,33 @@ export function traceRgba(
     regions.push(reg);
   }
 
-  const keep = regions.filter(
-    (r) => r.area >= opts.minArea && !(opts.dropBackground && r.color === bg && r.border),
-  );
-  // Largest first: smaller regions are drawn on top, which is what turns an
-  // enclosed background region back into a visible hole.
-  keep.sort((a, b) => b.area - a.area);
+  // Containment depth via the parent chain: the pixel above a region's
+  // topmost-leftmost pixel belongs to the region "outside" it (or to a sibling
+  // stacked above — harmless, they don't overlap). Any region enclosed by a
+  // ring is strictly deeper than the ring, so painting shallow-to-deep puts
+  // enclosed content ON TOP of its enclosure. Sorting by raw area (the old
+  // scheme) broke whenever a thin border ring had LESS area than the fill it
+  // enclosed: the ring's solid outer-contour polygon painted over the fill.
+  const depths = new Int32Array(regions.length).fill(-1);
+  const depthOf = (label: number): number => {
+    if (depths[label] >= 0) return depths[label];
+    const r = regions[label];
+    // Parents start strictly higher up, so the chain terminates at row 0.
+    const d = r.sy === 0 ? 0 : depthOf(labels[(r.sy - 1) * w + r.sx]) + 1;
+    depths[label] = d;
+    return d;
+  };
+  for (let i = 0; i < regions.length; i++) depthOf(i);
+
+  const keep = regions.filter((r) => {
+    if (r.area < opts.minArea) return false;
+    // Transparent regions: the border-touching one is the outside world; an
+    // enclosed one is a genuine hole and becomes a white shape (the canvas
+    // and the rendered page are white, so this reads as a cut-out).
+    if (r.color < 0) return !r.border;
+    return !(opts.dropBackground && r.color === bg && r.border);
+  });
+  keep.sort((a, b) => depths[a.label] - depths[b.label] || b.area - a.area);
 
   const sx = target.w / w;
   const sy = target.h / h;
@@ -472,11 +540,11 @@ export function traceRgba(
     // enough to clean up big shapes would collapse small ones to nothing.
     const regEps = Math.min(eps, 0.25 * Math.max(1, Math.min(reg.x1 - reg.x0 + 1, reg.y1 - reg.y0 + 1)));
     const ring = capVertices(
-      simplifyRing(smoothRing(traceContour(labels, w, h, reg.label, reg.sx, reg.sy)), regEps),
+      roundCorners(simplifyRing(smoothRing(traceContour(labels, w, h, reg.label, reg.sx, reg.sy)), regEps), 2),
       MAX_VERTICES_PER_SHAPE,
     );
     if (ring.length < 3) continue;
-    const fill = toHex(palette[reg.color]);
+    const fill = reg.color < 0 ? "#ffffff" : toHex(palette[reg.color]);
     // Stroke matches the fill: a hairline outline hides the seams that would
     // otherwise show between neighbouring regions in the rendered PDF.
     const style: Style = { ...DEFAULT_STYLE, stroke: fill, fill, lineWidth: 0.4 };
