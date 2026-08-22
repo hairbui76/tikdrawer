@@ -6,6 +6,52 @@ A running log of decisions, changes, and gotchas for the **TikDrawer** project.
 
 ---
 
+## 2026-08-22 — Trace engine Phases 1+2: real curves + centerline strokes
+
+Executed the plan's two structural phases (user approved).
+
+**Phase 1 — smooth curve output.** `PolygonShape.rounded?: boolean`;
+`geometry.ts` gains `sharpVertices` (62° corner threshold), `roundedSegments`
+(Catmull-Rom controls, exact joins at sharp corners — sharp endpoints
+degenerate to straight tangents so corners stay crisp), and `polygonPathD`.
+The SAME control points drive the canvas `<path>` (ShapeView + TracePreview)
+and the TikZ `.. controls ..` output (closed rings end `.. cycle`), so
+preview and PDF agree. Tracer sets `rounded: true` and the Chaikin
+corner-cutting pass was deleted — the disc went 149 → 30 stored points and
+renders rounder; the diamond still traces to exactly 4 sharp vertices.
+
+**Phase 2 — centerline strokes.** In `importRaster.ts`: `traceStroke` reads a
+thin, elongated region as a drawn LINE — mean width from the quadratic whose
+roots are length and width (L+W = perimeter/2, L·W = area), accept if
+W ≤ 4.5 work px and L ≥ 3W; Zhang–Suen `thinToSkeleton`; skeleton walked
+into polylines split at junctions, spurs < max(4, 1.5W) pruned; pure loops
+become closed stroked paths. Emitted as open/closed `rounded` polylines,
+`fill: "none"`, `lineWidth = pxToPt(W·sx)`. Strokes paint AFTER all fills
+(lines-on-top convention — also stops a box fill half-covering its own
+centerlined border). `joinStrokes` endpoint-linking pass reconnects
+same-colour fragments cut by crossings (two tiers: ≤20 canvas px at cos 0.86,
+≤36 px at cos 0.95 — a shallow crossing steals grid-width ÷ sin θ of line).
+Open skeleton ends are re-extended W/2 + 2.5 px along their tangent
+(thinning erodes round caps; the crossing stroke paints later and hides
+overshoot).
+
+**Tuning findings (each visually verified):**
+- Palette trim is now importance = coverage × distance²-to-nearest — pure
+  redundancy dropped a flowchart's pale fill (huge coverage, closest to
+  white); pure coverage dropped a chart's red. The product keeps both.
+- `STROKE_MAX_W = 4.5`, not 6: bold display glyphs measure ~6 and must stay
+  FILLED to keep their weight (logo wordmark regressed to pen strokes at 6);
+  chart lines/borders/small text sit at 2–4. Small text as pen strokes is
+  actually MORE readable than blob outlines.
+
+**Results (fixtures, default settings):** chart = continuous smooth red/grey
+stroked curves + clean axes, 958 → 403 pts; flowchart = fills + crisp
+stroked borders + single-line arrows + legible stroke text, 854 → 304 pts;
+logo 27 shapes/565 pts → 18/168 with bold text intact; icon 168 → 49 pts.
+TikZ for the chart: 143 Bézier segments, 81 stroked polylines, 22 KB.
+Synthetics all pass; perf 290 ms worst case. Plan artifact updated
+(phases 1–2 marked landed).
+
 ## 2026-08-22 — Trace engine: research, plan, and the palette-diversity fix
 
 User asked for a researched plan to fix tracing ("now is really bad").

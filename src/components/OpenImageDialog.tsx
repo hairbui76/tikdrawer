@@ -2,7 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { DEFAULT_TRACE, traceImage, type TraceOptions, type TraceResult } from "@/lib/importRaster";
-import { CANVAS_H, CANVAS_W } from "@/lib/coords";
+import { CANVAS_H, CANVAS_W, ptToPx } from "@/lib/coords";
+import { polygonPathD } from "@/lib/geometry";
 import type { PolygonShape, Shape } from "@/lib/types";
 
 /**
@@ -285,12 +286,14 @@ function TracePreview({ shapes, busy, empty }: { shapes: Shape[]; busy: boolean;
   return (
     <svg viewBox={`0 0 ${CANVAS_W} ${CANVAS_H}`} className={`h-full w-full ${busy ? "opacity-50" : ""}`}>
       {polys.map((s) => (
-        <polygon
+        <path
           key={s.id}
-          points={s.points.map((p) => `${p.x},${p.y}`).join(" ")}
+          d={polygonPathD(s.points, s.closed, s.rounded)}
           fill={s.style.fill}
           stroke={s.style.stroke}
-          strokeWidth={0.5}
+          strokeWidth={s.style.fill === "none" ? ptToPx(s.style.lineWidth) : 0.5}
+          strokeLinecap="round"
+          strokeLinejoin="round"
         />
       ))}
     </svg>

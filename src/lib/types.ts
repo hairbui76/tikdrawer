@@ -48,6 +48,12 @@ export type PolygonShape = {
   kind: "polygon";
   points: Point[];
   closed: boolean;
+  /**
+   * Render as a smooth curve through gentle vertices (sharp corners stay
+   * exact) — set by the raster tracer so curves need far fewer points. Both
+   * the canvas and the TikZ output honour it; absent = straight segments.
+   */
+  rounded?: boolean;
   style: Style;
   rotation?: number;
   text?: string;

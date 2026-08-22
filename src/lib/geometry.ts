@@ -499,6 +499,76 @@ export function connectorPoints(c: ConnectorShape, byId: Map<string, Shape>): Po
 }
 
 /** Catmull-Rom → cubic Bézier controls, one {c1,c2} per segment (n-1 of them). */
+/** Vertices turning at least this much stay exact corners when a polygon is
+ *  `rounded` (matches VTracer's corner threshold). */
+const ROUND_SHARP = (62 * Math.PI) / 180;
+
+/** Which vertices of a ring/polyline are sharp corners (open endpoints always are). */
+export function sharpVertices(pts: Point[], closed: boolean): boolean[] {
+  const n = pts.length;
+  const out = new Array<boolean>(n).fill(true);
+  for (let i = 0; i < n; i++) {
+    if (!closed && (i === 0 || i === n - 1)) continue;
+    const p = pts[(i - 1 + n) % n], c = pts[i], q = pts[(i + 1) % n];
+    let turn = Math.abs(Math.atan2(q.y - c.y, q.x - c.x) - Math.atan2(c.y - p.y, c.x - p.x));
+    if (turn > Math.PI) turn = 2 * Math.PI - turn;
+    out[i] = turn >= ROUND_SHARP;
+  }
+  return out;
+}
+
+export type CurveSeg = { c1: Point; c2: Point; straight: boolean };
+
+/**
+ * Cubic control points for each segment of a `rounded` polygon: Catmull-Rom
+ * tangents through gentle vertices, exact joins at sharp corners. Segment i
+ * runs pts[i] → pts[i+1] (wrapping when closed). The same controls drive the
+ * canvas path and the TikZ `.. controls ..` output, so preview and PDF agree.
+ */
+export function roundedSegments(pts: Point[], closed: boolean): CurveSeg[] {
+  const n = pts.length;
+  const sharp = sharpVertices(pts, closed);
+  const segs: CurveSeg[] = [];
+  const count = closed ? n : n - 1;
+  for (let i = 0; i < count; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % n];
+    const aSharp = sharp[i];
+    const bSharp = sharp[(i + 1) % n];
+    if (aSharp && bSharp) {
+      segs.push({ c1: a, c2: b, straight: true });
+      continue;
+    }
+    // A sharp end degenerates to a straight tangent so the corner stays crisp.
+    const prev = pts[(i - 1 + n) % n];
+    const next = pts[(i + 2) % n];
+    const c1 = aSharp
+      ? { x: a.x + (b.x - a.x) / 3, y: a.y + (b.y - a.y) / 3 }
+      : { x: a.x + (b.x - prev.x) / 6, y: a.y + (b.y - prev.y) / 6 };
+    const c2 = bSharp
+      ? { x: b.x - (b.x - a.x) / 3, y: b.y - (b.y - a.y) / 3 }
+      : { x: b.x - (next.x - a.x) / 6, y: b.y - (next.y - a.y) / 6 };
+    segs.push({ c1, c2, straight: false });
+  }
+  return segs;
+}
+
+/** SVG path `d` for a polygon/polyline, honouring its `rounded` flag. */
+export function polygonPathD(pts: Point[], closed: boolean, rounded?: boolean): string {
+  if (!pts.length) return "";
+  if (!rounded || pts.length < 3) {
+    const body = pts.map((p, i) => `${i ? "L" : "M"}${p.x} ${p.y}`).join(" ");
+    return closed ? `${body} Z` : body;
+  }
+  const segs = roundedSegments(pts, closed);
+  let d = `M${pts[0].x} ${pts[0].y}`;
+  segs.forEach((s, i) => {
+    const b = pts[(i + 1) % pts.length];
+    d += s.straight ? ` L${b.x} ${b.y}` : ` C${s.c1.x} ${s.c1.y} ${s.c2.x} ${s.c2.y} ${b.x} ${b.y}`;
+  });
+  return closed ? `${d} Z` : d;
+}
+
 export function smoothControls(pts: Point[]): { c1: Point; c2: Point }[] {
   const segs: { c1: Point; c2: Point }[] = [];
   for (let i = 0; i < pts.length - 1; i++) {

@@ -1,5 +1,5 @@
 import { fmtUnit, lenToCm, pxToCmX, pxToCmY, round, type Unit } from "./coords";
-import { connectorPoints, shapeCenter, smoothControls } from "./geometry";
+import { connectorPoints, roundedSegments, shapeCenter, smoothControls } from "./geometry";
 import { imageFileName } from "./images";
 import { fontPtOf } from "./text";
 import type { ImageAsset, Point, Shape, Style } from "./types";
@@ -145,8 +145,24 @@ export function shapeToTikz(
       const ys = s.points.map((p) => p.y);
       const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
       const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+      const opts = `${styleOpts(s.style)}${rotPath(s.rotation, cx, cy, u)}`;
+      if (s.rounded && s.points.length >= 3) {
+        // Mixed Bézier path from the same control points the canvas renders,
+        // so the PDF matches the preview: curves through gentle vertices,
+        // exact joins at sharp corners.
+        const segs = roundedSegments(s.points, s.closed);
+        let path = coordP(s.points[0], u);
+        segs.forEach((seg, i) => {
+          const last = s.closed && i === segs.length - 1;
+          const to = last ? "cycle" : coordP(s.points[(i + 1) % s.points.length], u);
+          path += seg.straight
+            ? ` -- ${to}`
+            : ` .. controls ${coordP(seg.c1, u)} and ${coordP(seg.c2, u)} .. ${to}`;
+        });
+        return `\\draw[${opts}] ${path};`;
+      }
       const path = s.points.map((p) => coord(p.x, p.y, u)).join(" -- ");
-      return `\\draw[${styleOpts(s.style)}${rotPath(s.rotation, cx, cy, u)}] ${path}${s.closed ? " -- cycle" : ""};`;
+      return `\\draw[${opts}] ${path}${s.closed ? " -- cycle" : ""};`;
     }
     case "image": {
       const asset = images?.get(s.imageId);

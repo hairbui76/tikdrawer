@@ -20,6 +20,7 @@ import {
   connectorPoints,
   nearestOnPolyline,
   nearestPort,
+  polygonPathD,
   portsOf,
   rotatePoint,
   rotationOf,
@@ -185,12 +186,7 @@ function ShapeView({
       break;
     }
     case "polygon": {
-      const pts = shape.points.map((p) => `${p.x},${p.y}`).join(" ");
-      el = shape.closed ? (
-        <polygon points={pts} {...common} />
-      ) : (
-        <polyline points={pts} {...common} />
-      );
+      el = <path d={polygonPathD(shape.points, shape.closed, shape.rounded)} {...common} />;
       break;
     }
     case "image": {

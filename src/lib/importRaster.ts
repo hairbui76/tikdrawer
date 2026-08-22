@@ -25,7 +25,7 @@
 // The pure part (`traceRgba`) takes raw RGBA and runs anywhere; `traceImage`
 // adds browser decoding via <img> + canvas.
 
-import { CANVAS_H, CANVAS_W } from "./coords";
+import { CANVAS_H, CANVAS_W, pxToPt } from "./coords";
 import { DEFAULT_STYLE, type Point, type Shape, type Style } from "./types";
 
 const uid = (): string =>
@@ -351,43 +351,6 @@ function simplifyRing(ring: Point[], eps: number): Point[] {
   return open;
 }
 
-/**
- * Round GENTLE corners (they approximate curves) while keeping sharp ones
- * (real corners). One pass Chaikin-cuts each gentle vertex into two points a
- * quarter of the way along its edges, capped at 4 work px so long straight
- * edges keep their line; two passes turn DP's visible chords on a circle into
- * a smooth outline. Rectangle corners (90°) stay untouched.
- */
-function roundCorners(ring: Point[], iterations: number): Point[] {
-  const SHARP = (62 * Math.PI) / 180;
-  const STRAIGHT = 0.03;
-  const MAX_CUT = 4;
-  for (let it = 0; it < iterations; it++) {
-    const n = ring.length;
-    if (n < 4) return ring;
-    const out: Point[] = [];
-    for (let i = 0; i < n; i++) {
-      const p = ring[(i - 1 + n) % n];
-      const c = ring[i];
-      const q = ring[(i + 1) % n];
-      let turn = Math.abs(Math.atan2(q.y - c.y, q.x - c.x) - Math.atan2(c.y - p.y, c.x - p.x));
-      if (turn > Math.PI) turn = 2 * Math.PI - turn;
-      if (turn < STRAIGHT || turn >= SHARP) {
-        out.push(c);
-        continue;
-      }
-      const l1 = Math.hypot(c.x - p.x, c.y - p.y);
-      const l2 = Math.hypot(q.x - c.x, q.y - c.y);
-      const t1 = Math.min(0.25, MAX_CUT / (l1 || 1));
-      const t2 = Math.min(0.25, MAX_CUT / (l2 || 1));
-      out.push({ x: c.x - (c.x - p.x) * t1, y: c.y - (c.y - p.y) * t1 });
-      out.push({ x: c.x + (q.x - c.x) * t2, y: c.y + (q.y - c.y) * t2 });
-    }
-    ring = out;
-  }
-  return ring;
-}
-
 /** Evenly thin an over-long ring down to `max` vertices, keeping its shape. */
 function capVertices(ring: Point[], max: number): Point[] {
   if (ring.length <= max) return ring;
@@ -395,6 +358,255 @@ function capVertices(ring: Point[], max: number): Point[] {
   const out: Point[] = [];
   for (let i = 0; i < max; i++) out.push(ring[Math.floor(i * step)]);
   return out;
+}
+
+/* ------------------------------ centerline ------------------------------- */
+
+/** Widest (work px) a region's mean stroke width can be and still be read as
+ *  a drawn LINE rather than a filled shape. Chart lines, borders and small
+ *  text sit at 2–4; BOLD display glyphs measure ~6 and must stay filled so
+ *  they keep their weight. */
+const STROKE_MAX_W = 4.5;
+
+type StrokeFit = { paths: Point[][]; loops: boolean[]; width: number };
+
+/**
+ * Try to read a region as a STROKE — a drawn line — instead of a filled shape.
+ *
+ * For an elongated band, length+width ≈ half the perimeter and length×width ≈
+ * the area, so both are roots of x² − (P/2)x + A = 0. If that solves to a
+ * thin, elongated band, the region is thinned to a 1px skeleton (Zhang–Suen)
+ * and the skeleton walked into polylines split at junctions. Outline tracing
+ * would instead produce two parallel wiggly edges and a filled sliver — the
+ * classic reason chart axes and arrows trace badly in every outline tracer.
+ *
+ * Returns null when the region is not stroke-like; the caller falls back to
+ * the outline fill, so there is no regression risk for solid shapes.
+ */
+function traceStroke(
+  labels: Int32Array,
+  w: number,
+  reg: { label: number; area: number; x0: number; y0: number; x1: number; y1: number },
+): StrokeFit | null {
+  const bw = reg.x1 - reg.x0 + 3; // 1px pad each side, so ZS needs no bounds checks
+  const bh = reg.y1 - reg.y0 + 3;
+  if (bw * bh > 1_500_000) return null; // pathological; outline mode is fine
+
+  // Build the padded mask and count the exposed 4-edges (staircase perimeter).
+  const mask = new Uint8Array(bw * bh);
+  let perimeter = 0;
+  for (let y = reg.y0; y <= reg.y1; y++) {
+    for (let x = reg.x0; x <= reg.x1; x++) {
+      if (labels[y * w + x] !== reg.label) continue;
+      mask[(y - reg.y0 + 1) * bw + (x - reg.x0 + 1)] = 1;
+      if (x === 0 || labels[y * w + x - 1] !== reg.label) perimeter++;
+      if (labels[y * w + x + 1] !== reg.label || x === w - 1) perimeter++;
+      if (y === 0 || labels[(y - 1) * w + x] !== reg.label) perimeter++;
+      if (labels[(y + 1) * w + x] !== reg.label) perimeter++;
+    }
+  }
+  const half = perimeter / 2;
+  const disc = half * half - 4 * reg.area;
+  if (disc <= 0) return null; // blobby, not band-like
+  const width = (half - Math.sqrt(disc)) / 2;
+  const length = half - width;
+  if (width > STROKE_MAX_W || length < 3 * Math.max(1, width)) return null;
+
+  thinToSkeleton(mask, bw, bh);
+
+  // Walk the skeleton into polylines: nodes are endpoints/junctions (degree
+  // ≠ 2); paths run node-to-node; whatever remains is a pure loop.
+  const NB = [-bw - 1, -bw, -bw + 1, -1, 1, bw - 1, bw, bw + 1];
+  const degree = (i: number): number => {
+    let d = 0;
+    for (const o of NB) if (mask[i + o]) d++;
+    return d;
+  };
+  const isNode = (i: number): boolean => mask[i] === 1 && degree(i) !== 2;
+  const used = new Uint8Array(bw * bh); // interior pixels consumed by a path
+  const paths: Point[][] = [];
+  const loops: boolean[] = [];
+  const toPoint = (i: number): Point => ({
+    x: (i % bw) - 1 + reg.x0 + 0.5,
+    y: Math.floor(i / bw) - 1 + reg.y0 + 0.5,
+  });
+
+  const walk = (from: number, into: number): number[] => {
+    const px = [from];
+    let prev = from;
+    let cur = into;
+    while (mask[cur] && !isNode(cur) && !used[cur]) {
+      used[cur] = 1;
+      px.push(cur);
+      let next = -1;
+      for (const o of NB) {
+        const n = cur + o;
+        if (mask[n] && n !== prev && (isNode(n) || !used[n])) { next = n; break; }
+      }
+      if (next < 0) return px; // dead end (shouldn't happen off a clean skeleton)
+      prev = cur;
+      cur = next;
+    }
+    px.push(cur);
+    return px;
+  };
+
+  for (let i = 0; i < bw * bh; i++) {
+    if (!isNode(i)) continue;
+    for (const o of NB) {
+      const n = i + o;
+      if (!mask[n] || used[n] || (isNode(n) && n < i)) continue;
+      const px = isNode(n) ? [i, n] : walk(i, n);
+      // Prune short spurs (skeletonisation nubs), keep real segments.
+      if (px.length >= Math.max(4, 1.5 * width)) {
+        paths.push(px.map(toPoint));
+        loops.push(false);
+      }
+    }
+  }
+  // Pure loops (a ring skeleton has no nodes at all).
+  for (let i = 0; i < bw * bh; i++) {
+    if (!mask[i] || used[i] || isNode(i)) continue;
+    const px = [i];
+    used[i] = 1;
+    let prev = i;
+    let cur = -1;
+    for (const o of NB) if (mask[i + o]) { cur = i + o; break; }
+    while (cur >= 0 && cur !== i && !used[cur]) {
+      used[cur] = 1;
+      px.push(cur);
+      let next = -1;
+      for (const o of NB) {
+        const n = cur + o;
+        if (mask[n] && n !== prev && !used[n]) { next = n; break; }
+        if (n === i && px.length > 2) next = n; // closed the loop
+      }
+      if (next === i || next < 0) break;
+      prev = cur;
+      cur = next;
+    }
+    if (px.length >= 6) {
+      paths.push(px.map(toPoint));
+      loops.push(true);
+    }
+  }
+
+  // Thinning erodes rounded line ends by about half the stroke width, and a
+  // crossing line steals its own width plus anti-aliasing from both sides —
+  // together that reads as a dash gap wherever lines intersect. Extend each
+  // open end back out along its local tangent far enough to bridge a typical
+  // crossing; overshoot tucks under the crossing stroke, which paints later.
+  const ext = width / 2 + 2.5;
+  for (let k = 0; k < paths.length; k++) {
+    if (loops[k]) continue;
+    const path = paths[k];
+    if (path.length < 2) continue;
+    const grow = (tip: Point, ref: Point): Point => {
+      const len = Math.hypot(tip.x - ref.x, tip.y - ref.y) || 1;
+      return { x: tip.x + ((tip.x - ref.x) / len) * ext, y: tip.y + ((tip.y - ref.y) / len) * ext };
+    };
+    const a = Math.min(3, path.length - 1);
+    path.unshift(grow(path[0], path[a]));
+    path.push(grow(path[path.length - 1], path[path.length - 1 - a]));
+  }
+
+  return paths.length ? { paths, loops, width: Math.max(1, width) } : null;
+}
+
+/** Zhang–Suen thinning: erode the mask down to a 1px-wide skeleton. */
+function thinToSkeleton(mask: Uint8Array, bw: number, bh: number): void {
+  const toClear: number[] = [];
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let step = 0; step < 2; step++) {
+      toClear.length = 0;
+      for (let y = 1; y < bh - 1; y++) {
+        for (let x = 1; x < bw - 1; x++) {
+          const i = y * bw + x;
+          if (!mask[i]) continue;
+          const p2 = mask[i - bw], p3 = mask[i - bw + 1], p4 = mask[i + 1], p5 = mask[i + bw + 1];
+          const p6 = mask[i + bw], p7 = mask[i + bw - 1], p8 = mask[i - 1], p9 = mask[i - bw - 1];
+          const b = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
+          if (b < 2 || b > 6) continue;
+          let a = 0;
+          if (!p2 && p3) a++;
+          if (!p3 && p4) a++;
+          if (!p4 && p5) a++;
+          if (!p5 && p6) a++;
+          if (!p6 && p7) a++;
+          if (!p7 && p8) a++;
+          if (!p8 && p9) a++;
+          if (!p9 && p2) a++;
+          if (a !== 1) continue;
+          if (step === 0 ? p2 * p4 * p6 !== 0 || p4 * p6 * p8 !== 0 : p2 * p4 * p8 !== 0 || p2 * p6 * p8 !== 0) continue;
+          toClear.push(i);
+        }
+      }
+      if (toClear.length) {
+        changed = true;
+        for (const i of toClear) mask[i] = 0;
+      }
+    }
+  }
+}
+
+/**
+ * Reconnect stroke fragments. A line interrupted by a crossing (a curve over
+ * a gridline) quantises into separate regions, so its centerline arrives in
+ * pieces. Join open strokes of the same colour and similar width whose free
+ * ends sit close together with aligned tangents — the standard endpoint-
+ * linking pass of line vectorisation. Ticks meeting an axis at right angles
+ * fail the tangent test and stay separate.
+ */
+function joinStrokes(strokes: Extract<Shape, { kind: "polygon" }>[]): void {
+  // Two tiers: modest gaps join at ~30° tolerance; a shallow crossing steals
+  // a LONG stretch (grid width ÷ sin of the crossing angle), so longer jumps
+  // are allowed only when both tangents line up almost perfectly.
+  const JOIN_DIST = 20; // canvas px
+  const ALIGN = 0.86; // cos ~30°
+  const FAR_DIST = 36;
+  const FAR_ALIGN = 0.95; // cos ~18°
+  const outward = (pts: Point[], atEnd: boolean): Point => {
+    const tip = atEnd ? pts[pts.length - 1] : pts[0];
+    const ref = atEnd ? pts[Math.max(0, pts.length - 3)] : pts[Math.min(pts.length - 1, 2)];
+    const len = Math.hypot(tip.x - ref.x, tip.y - ref.y) || 1;
+    return { x: (tip.x - ref.x) / len, y: (tip.y - ref.y) / len };
+  };
+  let joined = true;
+  while (joined) {
+    joined = false;
+    outer: for (let i = 0; i < strokes.length; i++) {
+      const a = strokes[i];
+      if (a.closed) continue;
+      for (let j = i + 1; j < strokes.length; j++) {
+        const b = strokes[j];
+        if (b.closed || a.style.stroke !== b.style.stroke) continue;
+        const ratio = a.style.lineWidth / b.style.lineWidth;
+        if (ratio > 1.8 || ratio < 0.55) continue;
+        for (const aEnd of [false, true]) {
+          for (const bEnd of [false, true]) {
+            const pa = aEnd ? a.points[a.points.length - 1] : a.points[0];
+            const pb = bEnd ? b.points[b.points.length - 1] : b.points[0];
+            const d = Math.hypot(pa.x - pb.x, pa.y - pb.y);
+            if (d > FAR_DIST || d === 0) continue;
+            const need = d > JOIN_DIST ? FAR_ALIGN : ALIGN;
+            const gap = { x: (pb.x - pa.x) / d, y: (pb.y - pa.y) / d };
+            const ta = outward(a.points, aEnd);
+            const tb = outward(b.points, bEnd);
+            if (ta.x * gap.x + ta.y * gap.y < need) continue;
+            if (tb.x * -gap.x + tb.y * -gap.y < need) continue;
+            const head = aEnd ? a.points : [...a.points].reverse();
+            const tail = bEnd ? [...b.points].reverse() : b.points;
+            a.points = [...head, ...tail];
+            strokes.splice(j, 1);
+            joined = true;
+            continue outer;
+          }
+        }
+      }
+    }
+  }
 }
 
 /* --------------------------------- trace --------------------------------- */
@@ -426,21 +638,25 @@ export function traceRgba(
   // genuinely distinct colours (a red bar, a border blue) never get their
   // own entry — they averaged into mud.
   const entries = mergeClose(medianCut(histogram(data), colors + 4), 32);
-  // Trim to the requested count by dropping the most REDUNDANT entry — the
-  // lower-coverage member of the closest remaining pair — never merely the
-  // smallest. Keeping top-N by coverage erased a chart's red/blue curves:
-  // chromatically vital, but a tiny fraction of the pixels next to white
-  // background and grey gridlines.
+  // Trim to the requested count by importance = coverage × distinctiveness².
+  // Coverage alone erased a chart's red/blue curves (chromatically vital,
+  // pixel-tiny); distinctiveness alone erased a flowchart's pale box fill
+  // (huge coverage, but the closest entry to white). The product keeps both:
+  // an entry only drops when it is small AND near a surviving colour.
   while (entries.length > colors) {
-    let bi = 0, bj = 1, best = Infinity;
+    let worst = -1;
+    let worstScore = Infinity;
     for (let i = 0; i < entries.length; i++) {
-      for (let j = i + 1; j < entries.length; j++) {
+      let nearest = Infinity;
+      for (let j = 0; j < entries.length; j++) {
+        if (j === i) continue;
         const a = entries[i].color, b = entries[j].color;
-        const d = (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2;
-        if (d < best) { best = d; bi = i; bj = j; }
+        nearest = Math.min(nearest, (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2);
       }
+      const score = entries[i].count * nearest;
+      if (score < worstScore) { worstScore = score; worst = i; }
     }
-    entries.splice(entries[bi].count >= entries[bj].count ? bj : bi, 1);
+    entries.splice(worst, 1);
   }
   const palette = entries.map((e) => e.color);
   if (!palette.length) return { shapes: [], regions: 0, dropped: 0, vertices: 0, palette: [] };
@@ -555,14 +771,47 @@ export function traceRgba(
   const eps = Math.max(0.5, (0.5 + (1 - detail) * (1 - detail) * 6) / sx);
 
   const shapes: Shape[] = [];
+  // Centerlined strokes paint AFTER every fill (drawing convention: lines sit
+  // on top), so a box's fill never half-covers its own centerlined border.
+  const strokes: Shape[] = [];
   let vertices = 0;
+  const toCanvas = (p: Point): Point => ({
+    x: Math.round((target.x + p.x * sx) * 100) / 100,
+    y: Math.round((target.y + p.y * sy) * 100) / 100,
+  });
+
   for (const reg of keep) {
-    if (shapes.length >= MAX_SHAPES) break;
+    if (shapes.length + strokes.length >= MAX_SHAPES) break;
+
+    // A thin, elongated region is a drawn LINE: emit its centerline as a
+    // stroked path instead of a filled outline sliver.
+    if (reg.color >= 0) {
+      const fit = traceStroke(labels, w, reg);
+      if (fit) {
+        const colour = toHex(palette[reg.color]);
+        const widthPt = Math.max(0.4, Math.round(pxToPt(fit.width * sx) * 100) / 100);
+        fit.paths.forEach((path, i) => {
+          const pts = simplify(path, Math.max(0.8, eps * 0.75)).map(toCanvas);
+          if (pts.length < 2) return;
+          strokes.push({
+            id: uid(),
+            kind: "polygon",
+            closed: fit.loops[i],
+            rounded: true,
+            style: { ...DEFAULT_STYLE, stroke: colour, fill: "none", lineWidth: widthPt },
+            points: pts,
+          });
+          vertices += pts.length;
+        });
+        continue;
+      }
+    }
+
     // Cap the tolerance against the region's own size: a global epsilon large
     // enough to clean up big shapes would collapse small ones to nothing.
     const regEps = Math.min(eps, 0.25 * Math.max(1, Math.min(reg.x1 - reg.x0 + 1, reg.y1 - reg.y0 + 1)));
     const ring = capVertices(
-      roundCorners(simplifyRing(smoothRing(traceContour(labels, w, h, reg.label, reg.sx, reg.sy)), regEps), 2),
+      simplifyRing(smoothRing(traceContour(labels, w, h, reg.label, reg.sx, reg.sy)), regEps),
       MAX_VERTICES_PER_SHAPE,
     );
     if (ring.length < 3) continue;
@@ -574,15 +823,17 @@ export function traceRgba(
       id: uid(),
       kind: "polygon",
       closed: true,
+      // Rendered as smooth curves through gentle vertices (sharp corners
+      // stay exact), so far fewer points are needed than straight segments.
+      rounded: true,
       style,
-      points: ring.map((p) => ({
-        x: Math.round((target.x + p.x * sx) * 100) / 100,
-        y: Math.round((target.y + p.y * sy) * 100) / 100,
-      })),
+      points: ring.map(toCanvas),
     });
     vertices += ring.length;
   }
 
+  joinStrokes(strokes as Extract<Shape, { kind: "polygon" }>[]);
+  shapes.push(...strokes);
   return {
     shapes,
     regions: shapes.length,
