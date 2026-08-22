@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { DEFAULT_TRACE, traceImage, type TraceOptions, type TraceResult } from "@/lib/importRaster";
+import { DEFAULT_TRACE, type TraceOptions, type TraceResult } from "@/lib/importRaster";
+import { traceImageOffThread } from "@/lib/traceClient";
 import { CANVAS_H, CANVAS_W, ptToPx } from "@/lib/coords";
 import { polygonPathD } from "@/lib/geometry";
 import type { PolygonShape, Shape } from "@/lib/types";
@@ -45,7 +46,7 @@ export function OpenImageDialog({
     setBusy(true);
     const timer = window.setTimeout(async () => {
       try {
-        const r = await traceImage(dataUrl, opts);
+        const r = await traceImageOffThread(dataUrl, opts);
         if (runRef.current === run) {
           setResult(r);
           setError(null);
@@ -70,14 +71,36 @@ export function OpenImageDialog({
   const set = <K extends keyof TraceOptions>(k: K, v: TraceOptions[K]) =>
     setOpts((o) => ({ ...o, [k]: v }));
 
+  // Tiny marks are almost always rasterised text: tracing cannot rebuild
+  // readable glyphs, so offer to skip them (and retype labels afterwards).
+  const TINY = 14; // canvas px
+  const [skipTiny, setSkipTiny] = useState(false);
+  const isTiny = (s: Shape): boolean => {
+    if (s.kind !== "polygon" || !s.points.length) return false;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const p of s.points) {
+      if (p.x < x0) x0 = p.x;
+      if (p.x > x1) x1 = p.x;
+      if (p.y < y0) y0 = p.y;
+      if (p.y > y1) y1 = p.y;
+    }
+    return Math.max(x1 - x0, y1 - y0) < TINY;
+  };
+  const tinyCount = useMemo(() => (result ? result.shapes.filter(isTiny).length : 0), [result]);
+  const texty = !!result && result.shapes.length > 50 && tinyCount / result.shapes.length > 0.35;
+  const effectiveShapes = useMemo(
+    () => (result ? (skipTiny ? result.shapes.filter((s) => !isTiny(s)) : result.shapes) : []),
+    [result, skipTiny],
+  );
+
   const confirm = () => {
     if (mode === "place") return onPlace();
-    if (result?.shapes.length) onTrace(result.shapes);
+    if (effectiveShapes.length) onTrace(effectiveShapes);
   };
 
   const heavy = (result?.vertices ?? 0) > 4000;
   const empty = !busy && result !== null && result.shapes.length === 0;
-  const canConfirm = mode === "place" || (!busy && !!result?.shapes.length);
+  const canConfirm = mode === "place" || (!busy && effectiveShapes.length > 0);
 
   return (
     <div
@@ -121,7 +144,7 @@ export function OpenImageDialog({
             </Panel>
             <Panel label={mode === "trace" ? (busy ? "Tracing…" : "Traced result") : "Placed on the canvas"}>
               {mode === "trace" ? (
-                <TracePreview shapes={result?.shapes ?? []} busy={busy} empty={empty} />
+                <TracePreview shapes={effectiveShapes} busy={busy} empty={empty} />
               ) : (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img src={dataUrl} alt="" className="max-h-56 w-full object-contain opacity-90" />
@@ -182,6 +205,14 @@ export function OpenImageDialog({
                   />
                   Drop the background
                 </label>
+
+                <label
+                  className="flex items-center gap-2 text-sm text-slate-600"
+                  title="Drop marks smaller than 14px — usually rasterised text, which tracing can't make readable. Retype labels with text nodes instead."
+                >
+                  <input type="checkbox" checked={skipTiny} onChange={(e) => setSkipTiny(e.target.checked)} />
+                  Skip tiny marks{tinyCount > 0 ? ` (${tinyCount})` : ""}
+                </label>
               </div>
 
               <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
@@ -209,6 +240,12 @@ export function OpenImageDialog({
                 <p className="text-xs text-amber-700">
                   Nothing came out — the image has no flat areas at these settings. Lower “ignore areas under”,
                   raise the colour count, or place it as an image instead.
+                </p>
+              )}
+              {texty && !skipTiny && (
+                <p className="text-xs text-amber-700">
+                  Most of these shapes are tiny marks — probably text. Tracing can’t rebuild small text;
+                  place the image instead, or skip the tiny marks and retype the labels with text nodes.
                 </p>
               )}
               {heavy && (

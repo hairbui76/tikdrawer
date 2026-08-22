@@ -410,7 +410,12 @@ function traceStroke(
   if (disc <= 0) return null; // blobby, not band-like
   const width = (half - Math.sqrt(disc)) / 2;
   const length = half - width;
-  if (width > STROKE_MAX_W || length < 3 * Math.max(1, width)) return null;
+  if (length < 3 * Math.max(1, width)) return null;
+  // Thin ink is always a stroke. In the boundary zone up to ~8px, elongation
+  // decides: a data curve is hundreds of times longer than wide, while a bold
+  // glyph ("W", "e") measures 5–7px wide but only ~10× as long — glyphs must
+  // stay FILLED to keep their weight.
+  if (width > STROKE_MAX_W && !(width <= 8 && length >= 20 * width)) return null;
 
   thinToSkeleton(mask, bw, bh);
 
@@ -589,13 +594,20 @@ function joinStrokes(strokes: Extract<Shape, { kind: "polygon" }>[]): void {
             const pa = aEnd ? a.points[a.points.length - 1] : a.points[0];
             const pb = bEnd ? b.points[b.points.length - 1] : b.points[0];
             const d = Math.hypot(pa.x - pb.x, pa.y - pb.y);
-            if (d > FAR_DIST || d === 0) continue;
-            const need = d > JOIN_DIST ? FAR_ALIGN : ALIGN;
-            const gap = { x: (pb.x - pa.x) / d, y: (pb.y - pa.y) / d };
+            if (d > FAR_DIST) continue;
             const ta = outward(a.points, aEnd);
             const tb = outward(b.points, bEnd);
-            if (ta.x * gap.x + ta.y * gap.y < need) continue;
-            if (tb.x * -gap.x + tb.y * -gap.y < need) continue;
+            if (d < 0.75) {
+              // Coincident ends — the two pieces meet AT a skeleton junction
+              // pixel (a tiny spur split the line there). Continue straight
+              // through when the outward tangents oppose each other.
+              if (ta.x * tb.x + ta.y * tb.y > -ALIGN) continue;
+            } else {
+              const need = d > JOIN_DIST ? FAR_ALIGN : ALIGN;
+              const gap = { x: (pb.x - pa.x) / d, y: (pb.y - pa.y) / d };
+              if (ta.x * gap.x + ta.y * gap.y < need) continue;
+              if (tb.x * -gap.x + tb.y * -gap.y < need) continue;
+            }
             const head = aEnd ? a.points : [...a.points].reverse();
             const tail = bEnd ? [...b.points].reverse() : b.points;
             a.points = [...head, ...tail];
@@ -661,21 +673,67 @@ export function traceRgba(
   const palette = entries.map((e) => e.color);
   if (!palette.length) return { shapes: [], regions: 0, dropped: 0, vertices: 0, palette: [] };
 
-  // Snap every pixel to its nearest palette entry (-1 = transparent).
+  // Snap pixels to the palette in two stages. A pixel is CONFIDENT when it
+  // clearly belongs to one entry — a close match, or markedly closer to its
+  // best entry than to the runner-up. An AMBIGUOUS pixel — an anti-aliased
+  // blend sitting BETWEEN two entries — takes the local majority of settled
+  // neighbours instead: snapping blends to whichever entry is numerically
+  // nearest minted thin fringe regions along every edge (the faint halo
+  // outlining dark text on a light ground). Confidence must be relative,
+  // not an absolute radius: a thin curve's palette entry is itself an
+  // AA-polluted average, so its core pixels sit "far" from it while still
+  // being far closer to it than to anything else.
+  // Encoding: settled ≥ 0, transparent −1, pending = −2 − nearestEntry.
   const idx = new Int16Array(w * h);
+  const CONF2 = 40 * 40;
+  const RATIO2 = 2.25; // runner-up at least 1.5× as distant → clearly best
+  let pending: number[] = [];
   for (let p = 0; p < w * h; p++) {
     const i = p * 4;
     if (data[i + 3] < 128) { idx[p] = -1; continue; }
     const r = data[i], g = data[i + 1], b = data[i + 2];
     let best = 0;
     let bestD = Infinity;
+    let secondD = Infinity;
     for (let c = 0; c < palette.length; c++) {
       const dr = r - palette[c][0], dg = g - palette[c][1], db = b - palette[c][2];
       const d = dr * dr + dg * dg + db * db;
-      if (d < bestD) { bestD = d; best = c; }
+      if (d < bestD) { secondD = bestD; bestD = d; best = c; }
+      else if (d < secondD) secondD = d;
     }
-    idx[p] = best;
+    if (bestD <= CONF2 || bestD * RATIO2 <= secondD) idx[p] = best;
+    else {
+      idx[p] = -2 - best;
+      pending.push(p);
+    }
   }
+  const tally = new Int32Array(palette.length);
+  for (let pass = 0; pass < 4 && pending.length; pass++) {
+    const settle: number[] = []; // [pixel, colour] pairs, applied after the scan
+    const next: number[] = [];
+    for (const p of pending) {
+      const x = p % w, y = (p / w) | 0;
+      tally.fill(0);
+      let any = false;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue;
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          const v = idx[ny * w + nx];
+          if (v >= 0) { tally[v]++; any = true; }
+        }
+      }
+      if (!any) { next.push(p); continue; }
+      let c = 0;
+      for (let k = 1; k < palette.length; k++) if (tally[k] > tally[c]) c = k;
+      settle.push(p, c);
+    }
+    for (let k = 0; k < settle.length; k += 2) idx[settle[k]] = settle[k + 1];
+    pending = next;
+  }
+  // Anything still unsettled (a wide gradient, a photo) falls back to nearest.
+  for (const p of pending) if (idx[p] <= -2) idx[p] = -2 - idx[p];
 
   despeckle(idx, w, h, 2);
 
@@ -846,7 +904,7 @@ export function traceRgba(
 /* --------------------------------- decode -------------------------------- */
 
 /** Decode a data URL to RGBA at a working resolution (browser only). */
-function decode(dataUrl: string, maxDim: number): Promise<{ data: Uint8ClampedArray; w: number; h: number }> {
+export function decode(dataUrl: string, maxDim: number): Promise<{ data: Uint8ClampedArray; w: number; h: number }> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onerror = () => reject(new Error("Could not decode the image"));

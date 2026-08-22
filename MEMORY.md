@@ -6,6 +6,47 @@ A running log of decisions, changes, and gotchas for the **TikDrawer** project.
 
 ---
 
+## 2026-08-22 — Trace engine Phases 3+4: AA assignment, worker, tests, text UX
+
+**Phase 3 — confident/ambiguous pixel assignment.** Pixels snap to the
+palette in two stages: CONFIDENT (close match, OR ≥1.5× closer to best than
+to runner-up) keep their entry; AMBIGUOUS (anti-aliased blends BETWEEN two
+entries) take the local majority of settled neighbours over ≤4 parallel
+passes; leftovers fall back to nearest. Kills the fringe halo around text.
+**Critical lesson:** confidence MUST be relative, not an absolute radius —
+the first version (absolute ≤40) silently ATE thin curves whose palette
+entry is itself an AA-polluted average (core pixels sat "far" from their own
+entry and the neighbour flood converted the whole curve to background).
+Caught by the new test suite, not by eye. Logo: 25 → 16 shapes, wordmark
+fringe gone.
+
+**Phase 4 — worker, tests, text guidance.**
+- `trace.worker.ts` + `traceClient.ts` (`traceImageOffThread`): decode on
+  main thread (needs <img>/canvas), transfer RGBA to a Web Worker for
+  `traceRgba`, inline fallback (SSR/boot failure re-runs via dataUrl since
+  buffers were transferred away). Measured: worst main-thread gap during a
+  max-detail 1024px trace = 48–66ms (was ~1.5s blocked). Next bundles
+  workers via `new Worker(new URL(...))` with no config.
+- **vitest suite** `src/lib/__tests__/importRaster.test.ts` + 5 PNG fixtures
+  (~270KB, `fixtures/`): synthetic geometry + every failure class that
+  actually happened (palette collapse, hole loss, ring-over-fill, stroke
+  confetti, bold-glyph weight). `npm test`. NOTE: vitest pinned to v2 —
+  vitest 4's rolldown native binding fails to install (npm optional-deps
+  bug). pngjs decodes fixtures. Tests run at fixture-NATIVE resolution
+  (no browser downscale), so AA is heavier than the app path — bounds are
+  tolerant ranges by design.
+- Dialog: "Skip tiny marks (N)" toggle filters sub-14px shapes from preview
+  and insert (378 → 192 on the infographic); an amber hint appears when >35%
+  of >50 shapes are tiny ("probably text — place as image or retype labels").
+- Stroke-fit tuning while testing: boundary-zone widths 4.5–8px are strokes
+  only when length ≥ 20× width (a curve is 100×+ longer than wide, a bold
+  glyph ~10×); joinStrokes handles coincident endpoints (skeleton-junction
+  splits meet AT one pixel — require opposing tangents instead of the
+  gap-direction test, which divided by zero and skipped them).
+
+15/15 tests green; perf 348ms worst-case photo (was 290 — Phase 3's cost);
+fixtures visually verified end-to-end. Plan artifact: all phases landed.
+
 ## 2026-08-22 — Trace engine Phases 1+2: real curves + centerline strokes
 
 Executed the plan's two structural phases (user approved).
