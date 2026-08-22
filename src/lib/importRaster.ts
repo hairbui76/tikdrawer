@@ -61,12 +61,19 @@ export type TraceResult = {
   palette: string[];
 };
 
-/** Longest side the image is resampled to before tracing. Bigger means slower
- *  and far more vertices, without much visible gain after simplification. */
-const WORK_MAX = 512;
+/**
+ * Longest side the image is resampled to before tracing. The detail slider
+ * raises it (512 → 1024): a dense infographic's small text is 2–3px tall at
+ * 512 and traces to unreadable blobs — resolution, not simplification, is
+ * what limits fine features. Cost grows with the square of the size.
+ */
+const WORK_BASE = 512;
+const WORK_EXTRA = 512;
+export const workMax = (detail: number): number =>
+  Math.round(WORK_BASE + Math.max(0, Math.min(1, detail)) * WORK_EXTRA);
 
 /** Hard caps so a photograph can't produce an unusable (or unrenderable) doc. */
-const MAX_SHAPES = 400;
+const MAX_SHAPES = 600;
 const MAX_VERTICES_PER_SHAPE = 500;
 
 /* ------------------------------- quantise -------------------------------- */
@@ -602,6 +609,6 @@ function decode(dataUrl: string, maxDim: number): Promise<{ data: Uint8ClampedAr
  * canvas. Browser-only — needs <img> + canvas to decode the pixels.
  */
 export async function traceImage(dataUrl: string, opts: TraceOptions = DEFAULT_TRACE): Promise<TraceResult> {
-  const { data, w, h } = await decode(dataUrl, WORK_MAX);
+  const { data, w, h } = await decode(dataUrl, workMax(opts.detail));
   return traceRgba(data, w, h, opts);
 }

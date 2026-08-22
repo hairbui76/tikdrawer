@@ -6,6 +6,28 @@ A running log of decisions, changes, and gotchas for the **TikDrawer** project.
 
 ---
 
+## 2026-08-22 — Trace working resolution scales with the Detail slider
+
+User traced a dense 914×646 infographic (lots of tiny text) — still bad.
+Root limit: everything was downscaled to 512px before tracing, so ~8px
+glyphs became 2–3px and traced to mush; the 400-shape cap also truncated
+dense content.
+
+- `workMax(detail)` = 512 + detail×512 (512..1024): the Detail slider now
+  raises the working resolution as well as the outline fidelity — resolution,
+  not simplification, is what limits small features. Cost is quadratic in
+  size; at detail 1 a photo-like worst case is ~1s (behind the dialog's
+  150ms debounce + async).
+- `MAX_SHAPES` 400 → 600.
+- Verified on the user's actual image: at defaults the structure (headers,
+  icons, rows) survives; at detail 0.9 + 6 colours the trace is essentially
+  a faithful copy (420 shapes, 13k points — the dialog's "a lot of geometry"
+  warning shows, correctly).
+- **Honest limit (told the user):** tiny raster text can never trace into
+  readable text — outline tracing yields letter-shaped squiggles at best.
+  Text-heavy slides are better placed as an image or redrawn with text
+  nodes; tracing suits logos/icons/diagrams.
+
 ## 2026-08-22 — Raster trace: holes, palette, curve smoothness (visual pass)
 
 User: "the image trace works really bad, have you checked it?" — honest
