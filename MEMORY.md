@@ -6,6 +6,14 @@ A running log of decisions, changes, and gotchas for the **TikDrawer** project.
 
 ---
 
+## 2026-08-22 — User rule: no artifacts, markdown docs instead
+
+User set a global rule: never create claude.ai artifacts; write deliverable
+documents as markdown in the repo. Recorded in `~/.claude/CLAUDE.md`
+(user-global) and in assistant memory. First application: the trace engine
+plan is now `docs/trace-engine-plan.md` (ported from the artifact, statuses
+current — all four phases landed).
+
 ## 2026-08-22 — Trace engine Phases 3+4: AA assignment, worker, tests, text UX
 
 **Phase 3 — confident/ambiguous pixel assignment.** Pixels snap to the
