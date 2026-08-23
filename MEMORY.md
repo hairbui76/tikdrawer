@@ -6,6 +6,27 @@ A running log of decisions, changes, and gotchas for the **TikDrawer** project.
 
 ---
 
+## 2026-08-23 — The user's real image: sketch-style infographic + presets
+
+User finally shared their actual source: a hand-drawn-style (Excalidraw-ish)
+infographic — sketchy icons, coloured section bars, graph-paper background,
+and text that is ALREADY greeked squiggles in the source (no tracer can make
+readable words from it; the squiggly trace output is faithful).
+
+- At defaults their image lost most pen marks (minArea 16 ate them; 1px
+  strokes need near-native working resolution). At **Detail 0.9 + Colours 8
+  + minArea 4** it traces faithfully: icons crisp, all marks kept, step-box
+  outlines present (512 shapes / 2025 pts).
+- **Added preset chips to the trace dialog** (values from fixture testing):
+  Logo/icon (4c, .5, 16) · Diagram/chart (6c, .7, 8) · Sketch (8c, .9, 4) ·
+  Screenshot (8c, .8, 6). One click on "Sketch" reproduces the tuned result
+  on their image — verified via harness screenshot.
+- Remaining loss on their image: near-white panel borders (very light grey
+  on white paper) still below the palette's radar at 8 colours — visible at
+  higher Colours; inherent tension, documented, not chased further.
+- Their image saved as a fixture candidate (scratchpad testimgs/userimg.png;
+  not committed — user content).
+
 ## 2026-08-23 — Trace: screenshot class + the histogram bucket-shift bug
 
 User: "still really bad". New fixtures (app screenshot with white cards on an

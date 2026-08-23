@@ -7,6 +7,31 @@ import { CANVAS_H, CANVAS_W, ptToPx } from "@/lib/coords";
 import { polygonPathD } from "@/lib/geometry";
 import type { PolygonShape, Shape } from "@/lib/types";
 
+/** Starting points per image class. Values found by visual testing against
+ *  fixture images of each kind — see docs/trace-engine-plan.md. */
+const PRESETS: { name: string; hint: string; opts: Partial<TraceOptions> }[] = [
+  {
+    name: "Logo / icon",
+    hint: "Few flat colours, clean shapes",
+    opts: { colors: 4, detail: 0.5, minArea: 16 },
+  },
+  {
+    name: "Diagram / chart",
+    hint: "Boxes, lines and curves become editable strokes",
+    opts: { colors: 6, detail: 0.7, minArea: 8 },
+  },
+  {
+    name: "Sketch",
+    hint: "Hand-drawn style: full resolution so thin pen strokes survive",
+    opts: { colors: 8, detail: 0.9, minArea: 4 },
+  },
+  {
+    name: "Screenshot",
+    hint: "UI cards, accents and small text marks",
+    opts: { colors: 8, detail: 0.8, minArea: 6 },
+  },
+];
+
 /**
  * Asks what to do with a bitmap: keep it as a picture, or trace it into editable
  * shapes. Tracing is a guess by nature — the settings that suit a logo ruin a
@@ -154,6 +179,32 @@ export function OpenImageDialog({
 
           {mode === "trace" && (
             <div className="mt-4 space-y-3 rounded border border-slate-200 bg-slate-50 p-3">
+              {/* One-click starting points — the settings that suit a logo
+                  ruin a sketch, and hunting sliders shouldn't be the job. */}
+              <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                <span className="mr-1 font-medium text-slate-500">Preset</span>
+                {PRESETS.map((p) => {
+                  const active =
+                    opts.colors === p.opts.colors &&
+                    opts.detail === p.opts.detail &&
+                    opts.minArea === p.opts.minArea;
+                  return (
+                    <button
+                      key={p.name}
+                      title={p.hint}
+                      onClick={() => setOpts((o) => ({ ...o, ...p.opts }))}
+                      className={`rounded-full border px-2.5 py-0.5 transition ${
+                        active
+                          ? "border-blue-500 bg-blue-50 text-blue-700"
+                          : "border-slate-300 bg-white text-slate-600 hover:bg-slate-100"
+                      }`}
+                    >
+                      {p.name}
+                    </button>
+                  );
+                })}
+              </div>
+
               <div className="grid gap-3 sm:grid-cols-2">
                 <label className="flex items-center justify-between gap-2 text-sm text-slate-600">
                   Colours
