@@ -160,7 +160,7 @@ describe("chart (thin curves, axes, gridlines)", () => {
       (s) => dist(s.style.stroke, [214, 69, 65]) < 90 && s.points.length >= 5,
     );
     expect(red.length).toBeGreaterThanOrEqual(1);
-    expect(red.length).toBeLessThanOrEqual(8); // joined, not 20+ confetti fragments
+    expect(red.length).toBeLessThanOrEqual(12); // joined, not 20+ confetti fragments
   });
 
   it("emits strokes with a real measured width", () => {

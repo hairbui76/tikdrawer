@@ -6,6 +6,48 @@ A running log of decisions, changes, and gotchas for the **TikDrawer** project.
 
 ---
 
+## 2026-08-23 — Trace: screenshot class + the histogram bucket-shift bug
+
+User: "still really bad". New fixtures (app screenshot with white cards on an
+off-white page + drop shadows + gradient header; dark-background diagram)
+exposed a chain of quantisation defects. The screenshot class was truly
+broken: card bodies vanished entirely (merged with the page background and
+dropped with it), accents washed out.
+
+- **THE bug: histogram bucket shift.** `r >> BITS` is only correct when
+  BITS = 4 (8−4 = 4 coincidence). The intended shift is `8 − BITS`
+  (`BUCKET_SHIFT`). Raising BITS to 5 without this made quantisation
+  COARSER (8 levels), not finer. Lesson: `x >> BITS` vs `x >> (8-BITS)` —
+  check which is meant whenever a bit-depth constant changes.
+- **5-bit histogram (32³)**: card-white (255) vs page (245) differ by ~10
+  per channel — a 16-unit bucket collapses them before median cut ever runs.
+- **Split priority = count × spread²**, not raw count: count-first spends
+  every split subdividing the huge tight white cluster and never reaches a
+  small saturated accent.
+- **Interleaved-only merging** (`mergeInterleaved` replaces mergeClose):
+  colour distance CANNOT distinguish JPEG-noise shades (~17 apart, must
+  merge) from card-vs-page (~17 apart, must NOT). The tell is spatial:
+  stride-2 provisional assignment → adjacency ratio = contacts /
+  min(count). Salt-and-pepper > 1; a blur/gradient ramp band ≈ 0.1–0.3.
+  Threshold 0.6 (0.12 chained cards→shadow→page transitively via
+  union-find — soft shadows are ramps everywhere).
+- **Greedy farthest-point palette selection** (k-means++-style,
+  count^0.7 × d² to the KEPT set) replaces iterative trimming — scoring
+  redundancy against entries that themselves get dropped collapsed white
+  clusters wrongly.
+- Round line caps/joins for centerlined strokes (TikZ `line cap=round,
+  line join=round`; SVG strokeLinecap/Join) — PDF strokes no longer stubby.
+- DEFAULT_TRACE.colors 4 → 6 (screenshots/infographics need accent slots).
+
+All 15 tests green; 8 fixture classes visually verified (screenshot now
+structurally faithful: header, cards+shadows, accents partial at 6 colours;
+dark diagram: coloured borders + readable-ish labels). Perf 391ms worst
+case. Remaining known limits: small text (inherent), gradients posterise
+into bands (inherent to flat-colour tracing).
+**Still missing: the user's actual failing image** — every round so far is
+against synthetic guesses; asked explicitly for their file + settings +
+confirmation they run latest main.
+
 ## 2026-08-22 — User rule: no artifacts, markdown docs instead
 
 User set a global rule: never create claude.ai artifacts; write deliverable

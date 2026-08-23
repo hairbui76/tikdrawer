@@ -145,7 +145,10 @@ export function shapeToTikz(
       const ys = s.points.map((p) => p.y);
       const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
       const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
-      const opts = `${styleOpts(s.style)}${rotPath(s.rotation, cx, cy, u)}`;
+      // Centerlined strokes need round caps/joins or the PDF shows stubby
+      // ends and cracked corners wherever segments meet.
+      const caps = s.style.fill === "none" ? ", line cap=round, line join=round" : "";
+      const opts = `${styleOpts(s.style)}${caps}${rotPath(s.rotation, cx, cy, u)}`;
       if (s.rounded && s.points.length >= 3) {
         // Mixed Bézier path from the same control points the canvas renders,
         // so the PDF matches the preview: curves through gentle vertices,

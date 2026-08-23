@@ -186,7 +186,10 @@ function ShapeView({
       break;
     }
     case "polygon": {
-      el = <path d={polygonPathD(shape.points, shape.closed, shape.rounded)} {...common} />;
+      // Stroked polylines (centerlined traces) get round caps/joins, matching
+      // the TikZ output; filled polygons don't care.
+      const caps = st.fill === "none" ? { strokeLinecap: "round" as const, strokeLinejoin: "round" as const } : {};
+      el = <path d={polygonPathD(shape.points, shape.closed, shape.rounded)} {...common} {...caps} />;
       break;
     }
     case "image": {

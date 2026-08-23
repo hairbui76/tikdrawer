@@ -43,7 +43,11 @@ export type TraceOptions = {
 };
 
 export const DEFAULT_TRACE: TraceOptions = {
-  colors: 4,
+  // 6, not 4: screenshots and infographics carry accent colours (a green
+  // stat, a red error count) that need their own slots — the importance-
+  // based trim keeps only genuinely distinct entries anyway, so simple
+  // logos are unaffected.
+  colors: 6,
   detail: 0.5,
   minArea: 16,
   dropBackground: true,
@@ -78,11 +82,18 @@ const MAX_VERTICES_PER_SHAPE = 500;
 
 /* ------------------------------- quantise -------------------------------- */
 
-// Colours are histogrammed into a 16×16×16 cube (4 bits per channel) so median
-// cut works on at most 4096 buckets instead of every pixel.
-const BITS = 4;
-const LEVELS = 1 << BITS; // 16
-const CUBE = LEVELS ** 3; // 4096
+// Colours are histogrammed into a 32×32×32 cube (5 bits per channel) so median
+// cut works on at most 32768 buckets instead of every pixel. 5 bits, not 4:
+// a white card on an off-white page differs by ~10 per channel, which a
+// 16-unit bucket collapses — median cut can never separate what the
+// histogram already merged. The extra noise splits 8-unit buckets produce
+// are folded back by the interleaving-aware merge.
+const BITS = 5;
+const LEVELS = 1 << BITS; // 32
+const CUBE = LEVELS ** 3; // 32768
+/** Channel value → bucket: DROP the low bits, i.e. shift by 8−BITS. (Shifting
+ *  by BITS was a lurking bug that only happened to be right when BITS was 4.) */
+const BUCKET_SHIFT = 8 - BITS;
 
 type Hist = { count: Uint32Array; sum: Float64Array };
 
@@ -92,7 +103,7 @@ function histogram(data: Uint8ClampedArray): Hist {
   for (let i = 0; i < data.length; i += 4) {
     if (data[i + 3] < 128) continue; // transparent pixels belong to no region
     const r = data[i], g = data[i + 1], b = data[i + 2];
-    const k = ((r >> BITS) << (BITS * 2)) | ((g >> BITS) << BITS) | (b >> BITS);
+    const k = ((r >> BUCKET_SHIFT) << (BITS * 2)) | ((g >> BUCKET_SHIFT) << BITS) | (b >> BUCKET_SHIFT);
     count[k]++;
     sum[k * 3] += r;
     sum[k * 3 + 1] += g;
@@ -119,10 +130,17 @@ function medianCut(hist: Hist, n: number): PaletteEntry[] {
 
   const boxes: Box[] = [{ keys, count: total }];
   while (boxes.length < n) {
-    // Split the heaviest box that still has something to split.
+    // Split the box with the largest count × spread². Raw count-first is the
+    // classic median-cut bias: it spends every split subdividing a huge but
+    // TIGHT cluster (a white page) and never reaches a small saturated one
+    // (a green stat, a red error count) sitting in a wide mixed box.
     let bi = -1;
+    let biScore = -1;
     for (let i = 0; i < boxes.length; i++) {
-      if (boxes[i].keys.length > 1 && (bi < 0 || boxes[i].count > boxes[bi].count)) bi = i;
+      if (boxes[i].keys.length <= 1) continue;
+      const span = spanOf(boxes[i].keys);
+      const score = boxes[i].count * (1 + span * span);
+      if (score > biScore) { biScore = score; bi = i; }
     }
     if (bi < 0) break;
     const box = boxes[bi];
@@ -160,7 +178,7 @@ function medianCut(hist: Hist, n: number): PaletteEntry[] {
     return { color: c ? [r / c, g / c, b / c] : [0, 0, 0], count: c };
   });
 
-  function widestChannel(ks: number[]): 0 | 1 | 2 {
+  function spans(ks: number[]): [number, number, number] {
     const lo = [LEVELS, LEVELS, LEVELS];
     const hi = [-1, -1, -1];
     for (const k of ks) {
@@ -170,43 +188,106 @@ function medianCut(hist: Hist, n: number): PaletteEntry[] {
         if (v[c] > hi[c]) hi[c] = v[c];
       }
     }
-    const span = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+    return [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+  }
+
+  function spanOf(ks: number[]): number {
+    const s = spans(ks);
+    return Math.max(s[0], s[1], s[2]);
+  }
+
+  function widestChannel(ks: number[]): 0 | 1 | 2 {
+    const span = spans(ks);
     if (span[0] >= span[1] && span[0] >= span[2]) return 0;
     return span[1] >= span[2] ? 1 : 2;
   }
 }
 
 /**
- * Merge palette entries closer than `dist` (Euclidean RGB), coverage-weighted.
- * Median cut on a JPEG readily produces two near-identical colours for one flat
- * area (compression noise pushes pixels across a bucket boundary); the boundary
- * between them then traces as a ragged, meaningless region edge. Never merges
- * below two colours so the background/foreground split survives.
+ * Merge near-duplicate palette entries — but only when their pixels are
+ * spatially INTERLEAVED. Colour distance alone cannot make this call: JPEG
+ * noise splits one flat area into shades ~17 apart that MUST merge (their
+ * boundary traces as ragged garbage), while a white card on an off-white
+ * page sits at the same ~17 — and merging those deleted the cards along
+ * with the background. The tell is adjacency: noise shades are salt-and-
+ * pepper mixed (adjacency ≈ their pixel count), design layers touch only
+ * along clean outlines (adjacency ≈ a perimeter, far smaller). Stats come
+ * from a stride-2 provisional assignment; entries < 8 apart are true
+ * duplicates and merge unconditionally.
  */
-function mergeClose(entries: PaletteEntry[], dist: number): PaletteEntry[] {
-  const d2 = dist * dist;
-  let merged = true;
-  while (merged && entries.length > 2) {
-    merged = false;
-    outer: for (let i = 0; i < entries.length; i++) {
-      for (let j = i + 1; j < entries.length; j++) {
-        const a = entries[i], b = entries[j];
-        const dr = a.color[0] - b.color[0];
-        const dg = a.color[1] - b.color[1];
-        const db = a.color[2] - b.color[2];
-        if (dr * dr + dg * dg + db * db < d2) {
-          const n = a.count + b.count;
-          a.color = a.color.map((v, k) => (v * a.count + b.color[k] * b.count) / n);
-          a.count = n;
-          entries.splice(j, 1);
-          merged = true;
-          break outer;
-        }
+function mergeInterleaved(
+  entries: PaletteEntry[],
+  data: Uint8ClampedArray,
+  w: number,
+  h: number,
+): PaletteEntry[] {
+  const k = entries.length;
+  if (k < 2) return entries;
+
+  // Provisional nearest-entry assignment on a stride-2 grid.
+  const gw = Math.ceil(w / 2);
+  const gh = Math.ceil(h / 2);
+  const prov = new Int16Array(gw * gh).fill(-1);
+  const cnt = new Uint32Array(k);
+  for (let gy = 0; gy < gh; gy++) {
+    for (let gx = 0; gx < gw; gx++) {
+      const p = (gy * 2 * w + gx * 2) * 4;
+      if (data[p + 3] < 128) continue;
+      const r = data[p], g = data[p + 1], b = data[p + 2];
+      let best = 0;
+      let bestD = Infinity;
+      for (let c = 0; c < k; c++) {
+        const dr = r - entries[c].color[0], dg = g - entries[c].color[1], db = b - entries[c].color[2];
+        const d = dr * dr + dg * dg + db * db;
+        if (d < bestD) { bestD = d; best = c; }
       }
+      prov[gy * gw + gx] = best;
+      cnt[best]++;
     }
   }
-  entries.sort((a, b) => b.count - a.count);
-  return entries;
+  const adj = new Uint32Array(k * k);
+  for (let gy = 0; gy < gh; gy++) {
+    for (let gx = 0; gx < gw; gx++) {
+      const a = prov[gy * gw + gx];
+      if (a < 0) continue;
+      const rgt = gx + 1 < gw ? prov[gy * gw + gx + 1] : -1;
+      const dwn = gy + 1 < gh ? prov[(gy + 1) * gw + gx] : -1;
+      if (rgt >= 0 && rgt !== a) { adj[a * k + rgt]++; adj[rgt * k + a]++; }
+      if (dwn >= 0 && dwn !== a) { adj[a * k + dwn]++; adj[dwn * k + a]++; }
+    }
+  }
+
+  // Union-find over entries: pairs merge when identical-ish, or when close
+  // in colour AND heavily interleaved on the grid.
+  const parent = entries.map((_, i) => i);
+  const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  for (let i = 0; i < k; i++) {
+    for (let j = i + 1; j < k; j++) {
+      const a = entries[i].color, b = entries[j].color;
+      const d2 = (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2;
+      if (d2 >= 32 * 32) continue;
+      // Salt-and-pepper noise gives ratios well above 1 (every pixel of the
+      // smaller shade touches the other repeatedly); a blur/gradient ramp is a
+      // 1-D contact band at ~0.1-0.3. The threshold must sit between them, or
+      // a card chains to the page through its own drop shadow and vanishes
+      // with the background.
+      const interleaved = adj[i * k + j] / Math.max(1, Math.min(cnt[i], cnt[j])) > 0.6;
+      if (d2 < 8 * 8 || interleaved) parent[find(i)] = find(j);
+    }
+  }
+  const groups = new Map<number, PaletteEntry>();
+  for (let i = 0; i < k; i++) {
+    const root = find(i);
+    const g = groups.get(root);
+    if (!g) {
+      groups.set(root, { color: [...entries[i].color], count: entries[i].count });
+    } else {
+      const n = g.count + entries[i].count;
+      g.color = g.color.map((v, c) => (v * g.count + entries[i].color[c] * entries[i].count) / n);
+      g.count = n;
+    }
+  }
+  return [...groups.values()].sort((a, b) => b.count - a.count);
 }
 
 /**
@@ -645,32 +726,42 @@ export function traceRgba(
   target: Target = fitTarget(w, h),
 ): TraceResult {
   const colors = Math.max(2, Math.min(16, Math.round(opts.colors)));
-  // Over-split, merge near-duplicates: without the head-room, median cut
-  // wastes splits on anti-aliasing shades that merge right back, and
-  // genuinely distinct colours (a red bar, a border blue) never get their
+  // Over-split, then merge interleaved near-duplicates: without the head-room,
+  // median cut wastes splits on anti-aliasing shades that merge right back,
+  // and genuinely distinct colours (a red bar, a border blue) never get their
   // own entry — they averaged into mud.
-  const entries = mergeClose(medianCut(histogram(data), colors + 4), 32);
-  // Trim to the requested count by importance = coverage × distinctiveness².
-  // Coverage alone erased a chart's red/blue curves (chromatically vital,
-  // pixel-tiny); distinctiveness alone erased a flowchart's pale box fill
-  // (huge coverage, but the closest entry to white). The product keeps both:
-  // an entry only drops when it is small AND near a surviving colour.
-  while (entries.length > colors) {
-    let worst = -1;
-    let worstScore = Infinity;
-    for (let i = 0; i < entries.length; i++) {
-      let nearest = Infinity;
-      for (let j = 0; j < entries.length; j++) {
-        if (j === i) continue;
-        const a = entries[i].color, b = entries[j].color;
-        nearest = Math.min(nearest, (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2);
+  const entries = mergeInterleaved(medianCut(histogram(data), colors + 10), data, w, h);
+  // Reduce to the requested count by greedy farthest-point selection
+  // (k-means++-style): start from the dominant entry, then repeatedly keep
+  // the entry with the largest coverage × distance²-to-the-kept-set. Judging
+  // redundancy against the FINAL kept set is what earlier attempts got
+  // wrong: scoring against entries that themselves get dropped collapses a
+  // cluster of similar whites to one even when card-vs-page needs two, while
+  // pure coverage ranking starves small accents (a green stat, a red curve).
+  let kept = entries;
+  if (entries.length > colors) {
+    kept = [entries[0]];
+    const rest = entries.slice(1);
+    while (kept.length < colors && rest.length) {
+      let best = 0;
+      let bestScore = -1;
+      for (let i = 0; i < rest.length; i++) {
+        let nearest = Infinity;
+        for (const s of kept) {
+          const a = rest[i].color, b = s.color;
+          nearest = Math.min(nearest, (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2);
+        }
+        // Sublinear coverage: a saturated accent covering 700 px must beat a
+        // fourth band of the same gradient covering 5000 — distinctness
+        // matters more than sheer area once the majors are in.
+        const score = Math.pow(rest[i].count, 0.7) * nearest;
+        if (score > bestScore) { bestScore = score; best = i; }
       }
-      const score = entries[i].count * nearest;
-      if (score < worstScore) { worstScore = score; worst = i; }
+      kept.push(rest.splice(best, 1)[0]);
     }
-    entries.splice(worst, 1);
+    kept.sort((a, b) => b.count - a.count);
   }
-  const palette = entries.map((e) => e.color);
+  const palette = kept.map((e) => e.color);
   if (!palette.length) return { shapes: [], regions: 0, dropped: 0, vertices: 0, palette: [] };
 
   // Snap pixels to the palette in two stages. A pixel is CONFIDENT when it
