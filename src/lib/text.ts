@@ -15,8 +15,14 @@ import type { Style } from "./types";
  *  used before font size was adjustable — existing drawings look unchanged. */
 export const DEFAULT_FONT_PT = 11.4;
 
-/** The font the canvas renders labels in (matches globals.css on `body`). */
-export const CANVAS_FONT_FAMILY = 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
+/**
+ * The font the canvas renders labels in. Latin Modern Roman (@font-face in
+ * globals.css) is the web build of LaTeX's Computer Modern, so canvas metrics
+ * track the compiled PDF: with a browser sans here, labels that fit their box
+ * on canvas overflowed it in the PDF (CM glyphs run wider). Georgia is the
+ * closest common fallback while the face loads.
+ */
+export const CANVAS_FONT_FAMILY = '"Latin Modern Roman", Georgia, "Times New Roman", serif';
 
 /** A style's label size in pt, falling back for drawings saved before it existed. */
 export const fontPtOf = (style: Pick<Style, "fontSize">): number =>

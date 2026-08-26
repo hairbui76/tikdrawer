@@ -1,5 +1,5 @@
 import { fmtUnit, lenToCm, pxToCmX, pxToCmY, round, type Unit } from "./coords";
-import { connectorPoints, roundedSegments, shapeCenter, smoothControls } from "./geometry";
+import { connectorPoints, roundedSegments, shapeCenter, sizeOf, smoothControls } from "./geometry";
 import { imageFileName } from "./images";
 import { fontPtOf } from "./text";
 import type { ImageAsset, Point, Shape, Style } from "./types";
@@ -180,21 +180,54 @@ export function shapeToTikz(
   }
 }
 
-/** A centered text label for a shape that carries `text` (skips node — its
- *  text is the node itself). */
+/** Usable label width inside a shape, as a fraction of its bounding box —
+ *  the inscribed area is smaller for round and diamond outlines. */
+function labelWidthFactor(kind: Shape["kind"]): number {
+  switch (kind) {
+    case "diamond":
+      return 0.55;
+    case "circle":
+    case "ellipse":
+      return 0.75;
+    default:
+      return 0.94;
+  }
+}
+
+/**
+ * A centered text label for a shape that carries `text` (skips node — its
+ * text is the node itself). The label is wrapped in `\fitlabel{<max width>}`:
+ * canvas and PDF fonts are metric-matched now, but any residual difference
+ * must shrink the label, never let it overflow the shape it belongs to.
+ */
 function labelOf(s: Shape, u: Unit): string {
   if (s.kind === "node") return "";
   const text = (s as { text?: string }).text;
   if (!text) return "";
   const c = shapeCenter(s);
   const rotation = (s as { rotation?: number }).rotation;
-  return `\n  \\node[text=${tikzColor(s.style.stroke)}${rotNode(rotation)}${fontOpt(s.style)}] at ${coord(c.x, c.y, u)} {${escapeTexText(text)}};`;
+  const size = sizeOf(s);
+  const body = size
+    ? `\\fitlabel{${len(size.w * labelWidthFactor(s.kind), u)}}{${escapeTexText(text)}}`
+    : escapeTexText(text);
+  return `\n  \\node[text=${tikzColor(s.style.stroke)}${rotNode(rotation)}${fontOpt(s.style)}] at ${coord(c.x, c.y, u)} {${body}};`;
 }
+
+/**
+ * `\fitlabel{<width>}{<text>}`: typeset the text, and only if its natural
+ * width exceeds the given one, scale it down to fit. Needs just graphicx
+ * (loaded by every figure-bearing paper); `\providecommand` keeps the
+ * snippet paste-safe when the command is already defined.
+ */
+const FITLABEL_DEF =
+  "\\providecommand{\\fitlabel}[2]{\\sbox0{#2}\\ifdim\\wd0>#1 \\resizebox{#1}{!}{\\usebox0}\\else\\usebox0\\fi}";
 
 export function generateTikz(shapes: Shape[], unit: Unit = "cm", images?: Map<string, ImageAsset>): string {
   const byId = new Map(shapes.map((s) => [s.id, s]));
   const body = shapes.map((s) => "  " + shapeToTikz(s, byId, unit, images) + labelOf(s, unit)).join("\n");
-  return `\\begin{tikzpicture}\n${body}\n\\end{tikzpicture}`;
+  // The \fitlabel helper rides along only when a label actually uses it.
+  const prelude = body.includes("\\fitlabel") ? `${FITLABEL_DEF}\n` : "";
+  return `${prelude}\\begin{tikzpicture}\n${body}\n\\end{tikzpicture}`;
 }
 
 /**

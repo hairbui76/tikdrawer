@@ -211,6 +211,7 @@ function ShapeView({
           textAnchor="middle"
           dominantBaseline="middle"
           fontSize={fontPxOf(st)}
+          fontFamily={CANVAS_FONT_FAMILY}
         >
           {shape.text}
         </text>
@@ -242,6 +243,7 @@ function ShapeView({
         textAnchor="middle"
         dominantBaseline="middle"
         fontSize={fontPxOf(st)}
+        fontFamily={CANVAS_FONT_FAMILY}
         pointerEvents="none"
       >
         {text}
@@ -567,6 +569,20 @@ export function CanvasStage() {
     }
     return { x, y };
   };
+
+  // Labels render and MEASURE in the LaTeX-matching webfont. The first paint
+  // can happen before it loads (fallback serif metrics); re-render once ready
+  // so text boxes, hit areas and the trace preview use the real face.
+  const [, setFontsReady] = useState(false);
+  useEffect(() => {
+    let live = true;
+    document.fonts?.ready.then(() => {
+      if (live) setFontsReady(true);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
 
   // Clear connect-hover when switching to a drawing tool (kept for select/connector).
   useEffect(() => {

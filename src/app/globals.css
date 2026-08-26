@@ -1,5 +1,21 @@
 @import "tailwindcss";
 
+/* Latin Modern = the web incarnation of LaTeX's Computer Modern. Canvas labels
+   render and MEASURE in this face so the drawing predicts the compiled PDF —
+   with a browser sans, text that fit a box on canvas overflowed it in LaTeX. */
+@font-face {
+  font-family: "Latin Modern Roman";
+  src: url("/fonts/lmroman10-regular.otf") format("opentype");
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Latin Modern Roman";
+  src: url("/fonts/lmroman10-bold.otf") format("opentype");
+  font-weight: 700;
+  font-display: swap;
+}
+
 html,
 body {
   height: 100%;

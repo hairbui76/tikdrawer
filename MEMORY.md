@@ -6,6 +6,40 @@ A running log of decisions, changes, and gotchas for the **TikDrawer** project.
 
 ---
 
+## 2026-08-26 — Canvas/PDF label parity (font metrics + overflow clamp)
+
+User showed canvas vs exported PDF side by side: same drawing, but in the
+PDF long labels overflowed their boxes ("HTTP Request (GET /index.html)"
+crashed through the P4 divider). Root cause: canvas measured/rendered
+labels in the browser sans while LaTeX sets Computer Modern — CM runs much
+wider, so text that fit on canvas overflowed in the PDF. Fixed from both
+ends:
+
+- **Canvas renders labels in Latin Modern Roman** (the web build of
+  Computer Modern): CTAN otf files in `public/fonts/`, @font-face in
+  globals.css, `CANVAS_FONT_FAMILY` now `"Latin Modern Roman", Georgia,
+  serif`, and the SVG `<text>` label elements set `fontFamily` explicitly
+  (they inherited body sans before — measuring in one font and rendering
+  in another). CanvasStage re-renders on `document.fonts.ready` so metrics
+  are re-measured once the face loads.
+- **TikZ labels are width-clamped**: box-shape labels emit as
+  `\fitlabel{<0.94·w>}{text}` (0.75 for circle/ellipse, 0.55 for diamond —
+  inscribed widths). `\fitlabel` = `\providecommand` + `\sbox0` + `\ifdim`
+  + `\resizebox`: shrinks ONLY when the natural width exceeds the box.
+  Needs just graphicx (no adjustbox dependency), and \providecommand keeps
+  the copied snippet paste-safe. The def line is prepended before
+  `\begin{tikzpicture}` only when a label uses it.
+- **Verified with a real LaTeX compile**: installed tectonic (static
+  binary, scratchpad/tex/) — no TeX on this machine, but tectonic + Read
+  tool (which renders PDFs) closes the loop. The exact failing row
+  compiles with the long label INSIDE its rounded box now. Canvas check:
+  label font-family applied, LM loaded, text/box fill ratio 95% on canvas
+  vs 94% clamp in PDF — matched.
+- Note: existing drawings' labels now display serif on canvas (was sans) —
+  intentional, canvas now predicts the PDF. Tectonic runs the fontspec
+  branch of fullDocument (XeTeX); default fontspec font = Latin Modern,
+  same metrics as the pdflatex branch's lmodern.
+
 ## 2026-08-23 — The user's real image: sketch-style infographic + presets
 
 User finally shared their actual source: a hand-drawn-style (Excalidraw-ish)
